@@ -7,11 +7,12 @@ def create_shortcuts() -> None:
     app_dir = Path(__file__).resolve().parent
     ico_path = create_app_icon()
 
-    bat_path = app_dir / "Lancer_Application.bat"
     exe_path = app_dir / "dist" / "BackblazeB2Uploader" / "BackblazeB2Uploader.exe"
+    bat_path = app_dir / "Lancer_Application.bat"
 
-    # Privilégier Lancer_Application.bat qui lance instantanément la dernière version (avec icône officielle)
-    target_path = bat_path if bat_path.exists() else exe_path
+    # Pointe directement vers l'exécutable .exe compilé avec l'icône officielle intégrée
+    # afin que le Bureau, l'Explorateur et la Barre des tâches Windows affichent toujours le logo officiel (et jamais le logo Python)
+    target_path = exe_path if exe_path.exists() else bat_path
 
     ps_script = f"""
 $WshShell = New-Object -ComObject WScript.Shell
@@ -27,10 +28,9 @@ foreach ($lnk in $ShortcutPaths) {{
     $Shortcut.TargetPath = "{target_path}"
     $Shortcut.WorkingDirectory = "{app_dir}"
     $Shortcut.IconLocation = "{ico_path},0"
-    $Shortcut.WindowStyle = 7
     $Shortcut.Description = "Sauvegarde Automatisée Backblaze B2 — Vos fichiers, sauvegardés automatiquement."
     $Shortcut.Save()
-    Write-Output "Raccourci mis à jour avec la nouvelle charte graphique : $lnk"
+    Write-Output "Raccourci créé : $lnk -> $({target_path})"
 }}
 ie4uinit.exe -show
 """

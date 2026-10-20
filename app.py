@@ -2,13 +2,23 @@ import os
 import sys
 import time
 import queue
+import ctypes
 import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Optional, List, Dict, Any
-from PIL import Image
+from PIL import Image, ImageTk
+
+# Identifiant Windows unique (AppUserModelID) indispensable pour que la barre des tâches Windows
+# affiche l'icône officielle de l'application au lieu de l'icône Python par défaut :
+APP_USER_MODEL_ID = "BackblazeB2.SauvegardeAutomatisee.DesktopApp.v1"
+if sys.platform == "win32":
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
 
 # Permet à l'exécutable PyInstaller (.exe) sur un PC distant (sans Python installé)
 # de charger en priorité les fichiers .py mis à jour à distance depuis GitHub :
@@ -98,15 +108,13 @@ class BackblazeUploaderApp(ctk.CTk):
         self.minsize(1060, 740)
         self.configure(fg_color=COLOR_SURFACE)
 
-        # Chargement de l'icône officielle de la fenêtre
-        for ico_name in ("icone_application_b2.ico", "app_icon.ico"):
-            ico_path = find_asset_path(ico_name)
-            if ico_path:
-                try:
-                    self.iconbitmap(str(ico_path))
-                    break
-                except Exception:
-                    pass
+        # Chargement et application forcée de l'icône officielle partout (barre de titre + barre des tâches Windows)
+        self._tk_icons: List[ImageTk.PhotoImage] = []
+        self._apply_window_icon()
+        # CustomTkinter réinitialise l'icône à 200ms dans son __init__, on la ré-applique donc après :
+        self.after(210, self._apply_window_icon)
+        self.after(550, self._apply_window_icon)
+        self.after(1200, self._apply_window_icon)
 
         self.config_manager = ConfigManager()
         self.saved_config = self.config_manager.load()
@@ -144,6 +152,62 @@ class BackblazeUploaderApp(ctk.CTk):
 
         # Fermeture propre de l'application
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _apply_window_icon(self) -> None:
+        """
+        Force l'application de l'icône officielle sur la fenêtre, la barre de titre,
+        Alt+Tab et la barre des tâches Windows (via iconbitmap + wm_iconphoto + API Win32 WM_SETICON).
+        """
+        ico_path = find_asset_path("icone_application_b2.ico") or find_asset_path("app_icon.ico")
+        if ico_path:
+            try:
+                self.iconbitmap(default=str(ico_path))
+                self.iconbitmap(str(ico_path))
+            except Exception:
+                pass
+
+        if not self._tk_icons:
+            for png_name in ("icone_256.png", "icone_128.png", "icone_64.png", "icone_32.png"):
+                png_path = find_asset_path(png_name)
+                if png_path:
+                    try:
+                        pil_img = Image.open(png_path).convert("RGBA")
+                        self._tk_icons.append(ImageTk.PhotoImage(pil_img))
+                    except Exception:
+                        pass
+
+        if self._tk_icons:
+            try:
+                self.wm_iconphoto(True, *self._tk_icons)
+            except Exception:
+                pass
+
+        # Application directe via l'API native Win32 (WM_SETICON sur le HWND de la fenêtre principale)
+        if sys.platform == "win32" and ico_path:
+            try:
+                self.update_idletasks()
+                hwnd = ctypes.windll.user32.GetParent(self.winfo_id()) or self.winfo_id()
+                IMAGE_ICON = 1
+                LR_LOADFROMFILE = 0x00000010
+                LR_DEFAULTSIZE = 0x00000040
+                WM_SETICON = 0x0080
+                ICON_SMALL = 0
+                ICON_BIG = 1
+
+                hicon_big = ctypes.windll.user32.LoadImageW(
+                    None, str(ico_path), IMAGE_ICON, 256, 256, LR_LOADFROMFILE
+                ) or ctypes.windll.user32.LoadImageW(
+                    None, str(ico_path), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE
+                )
+                hicon_small = ctypes.windll.user32.LoadImageW(
+                    None, str(ico_path), IMAGE_ICON, 32, 32, LR_LOADFROMFILE
+                )
+                if hicon_big:
+                    ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big)
+                if hicon_small:
+                    ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small)
+            except Exception:
+                pass
 
     def _load_brand_images(self) -> None:
         """Charge le logo principal et l'icône en respectant strictement leurs proportions."""
@@ -1032,13 +1096,16 @@ class BackblazeUploaderApp(ctk.CTk):
     def _restart_application(self) -> None:
         self._save_current_config()
         try:
-            app_py = get_app_dir() / "app.py"
-            if app_py.exists():
+            exe_candidate = get_app_dir() / "dist" / "BackblazeB2Uploader" / "BackblazeB2Uploader.exe"
+            if getattr(sys, "frozen", False):
+                subprocess.Popen([sys.executable] + sys.argv[1:], cwd=str(get_app_dir()))
+            elif exe_candidate.exists():
+                subprocess.Popen([str(exe_candidate)], cwd=str(get_app_dir()))
+            else:
+                app_py = get_app_dir() / "app.py"
                 pythonw = Path(sys.executable).with_name("pythonw.exe")
                 runner = str(pythonw) if pythonw.exists() else sys.executable
                 subprocess.Popen([runner, str(app_py)], cwd=str(get_app_dir()))
-            else:
-                subprocess.Popen([sys.executable] + sys.argv, cwd=str(get_app_dir()))
         except Exception:
             pass
         self.destroy()
@@ -1743,5 +1810,15 @@ class BackblazeUploaderApp(ctk.CTk):
 
 
 if __name__ == "__main__":
+    # Si exécuté depuis le .exe compilé et qu'une version mise à jour de app.py est présente sur le disque,
+    # on l'exécute directement dans le processus .exe (pour conserver l'icône native dans la barre des tâches Windows) :
+    if getattr(sys, "frozen", False) and not os.environ.get("_B2_EXTERNAL_LOADED"):
+        _ext_app = get_app_dir() / "app.py"
+        if _ext_app.exists():
+            os.environ["_B2_EXTERNAL_LOADED"] = "1"
+            import runpy
+            runpy.run_path(str(_ext_app), run_name="__main__")
+            sys.exit(0)
+
     app = BackblazeUploaderApp()
     app.mainloop()

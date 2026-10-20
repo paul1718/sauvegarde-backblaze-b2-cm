@@ -5,7 +5,7 @@ a = Analysis(
     ['D:/Automatisation/Sauvegarde Backblaze B2 CM/app.py'],
     pathex=[],
     binaries=[],
-    datas=[('C:/Users/PMD/AppData/Local/Programs/Python/Python312/Lib/site-packages/customtkinter', 'customtkinter')],
+    datas=[('C:/Users/PMD/AppData/Local/Programs/Python/Python312/Lib/site-packages/customtkinter', 'customtkinter'), ('D:/Automatisation/Sauvegarde Backblaze B2 CM/assets', 'assets')],
     hiddenimports=['openpyxl', 'pandas', 'b2sdk'],
     hookspath=[],
     hooksconfig={},
@@ -32,6 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['D:/Automatisation/Sauvegarde Backblaze B2 CM/assets/app_icon.ico'],
 )
 coll = COLLECT(
     exe,

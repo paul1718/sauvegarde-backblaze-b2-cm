@@ -33,6 +33,16 @@ class BackblazeUploaderApp(ctk.CTk):
         self.geometry("980x780")
         self.minsize(880, 700)
 
+        # Chargement de l'icône de l'application
+        icon_path = get_app_dir() / "assets" / "app_icon.ico"
+        if not icon_path.exists():
+            icon_path = Path(__file__).resolve().parent / "assets" / "app_icon.ico"
+        if icon_path.exists():
+            try:
+                self.iconbitmap(str(icon_path))
+            except Exception:
+                pass
+
         self.config_manager = ConfigManager()
         self.saved_config = self.config_manager.load()
 

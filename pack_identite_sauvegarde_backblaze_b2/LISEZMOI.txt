@@ -1,0 +1,17 @@
+SAUVEGARDE AUTOMATISÉE BACKBLAZE B2 — PACK IDENTITÉ VISUELLE
+Contenu :
+- logo_principal.svg : logo vectoriel modifiable
+- logo_principal.png : aperçu PNG haute résolution
+- icone_application.svg : icône vectorielle de l’application
+- icone_1024.png, icone_512.png, icone_256.png, icone_128.png, icone_64.png, icone_32.png : tailles PNG
+- maquette_interface.png : planche de présentation du concept UI
+
+Palette :
+Bleu profond #102A5E
+Bleu principal #0878F9
+Cyan #12B7F5
+Rouge accent #E51B23
+Fond #FFFFFF / surface #F2F6FC
+Texte secondaire #526078
+
+Note : ces éléments sont des propositions graphiques de concept. Backblaze et B2 sont des marques de leurs propriétaires respectifs. Vérifier les règles d’utilisation de marque avant diffusion commerciale.

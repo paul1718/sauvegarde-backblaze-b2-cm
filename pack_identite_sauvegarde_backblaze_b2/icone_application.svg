@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 512 512">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#12B7F5"/><stop offset="1" stop-color="#0878F9"/></linearGradient><linearGradient id="db" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0878F9"/><stop offset="1" stop-color="#102A5E"/></linearGradient></defs>
+<rect x="0" y="0" width="512" height="512" rx="100" fill="url(#bg)"/>
+<path d="M112 227 C76 227 54 201 54 170 C54 137 80 112 111 112 C130 69 173 53 211 66 C241 76 260 98 266 122 C306 118 339 148 339 183 C339 215 313 240 280 240 H119" fill="none" stroke="#FFFFFF" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M145 275 C111 303 111 352 133 379" fill="none" stroke="#FFFFFF" stroke-width="17" stroke-linecap="round"/><path d="M113 363 L134 386 L151 359" fill="none" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M323 277 C353 302 356 348 336 374" fill="none" stroke="#FFFFFF" stroke-width="17" stroke-linecap="round"/><path d="M316 365 L337 383 L356 358" fill="none" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M151 257 C151 241 190 229 232 229 C274 229 313 241 313 257 V352 C313 369 277 382 232 382 C188 382 151 369 151 352Z" fill="url(#db)"/>
+<ellipse cx="232" cy="257" rx="81" ry="28" fill="#12B7F5" stroke="#FFFFFF" stroke-width="5"/>
+<path d="M151 289 C151 306 188 319 232 319 C276 319 313 306 313 289" fill="none" stroke="#FFFFFF" stroke-width="7"/>
+<path d="M151 322 C151 339 188 352 232 352 C276 352 313 339 313 322" fill="none" stroke="#FFFFFF" stroke-width="7"/>
+<path d="M211 257 C198 257 190 248 190 236 C190 224 200 214 212 214 C218 198 232 192 246 197 C257 201 263 211 265 221 C279 221 289 231 289 243 C289 252 282 258 272 258Z" fill="#FFFFFF"/>
+<path d="M239 251 V225 M224 237 L239 222 L254 237" fill="none" stroke="#0878F9" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M94 150 C108 133 101 121 111 110 C128 128 131 142 121 154 C134 159 139 171 132 182 C123 195 103 195 94 182 C84 171 87 159 94 150Z" fill="#E51B23"/>
+<text x="348" y="172" font-family="Arial, Helvetica, sans-serif" font-size="37" font-weight="800" fill="#FFFFFF">B2</text>
+</svg>

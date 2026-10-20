@@ -201,11 +201,11 @@ class ExcelManager:
 
         status_cell = ws.cell(row=target_row, column=statut_col, value=status)
         if cls.is_completed_status(status):
-            status_cell.font = Font(color="107C41", bold=True)
+            status_cell.font = Font(color="16A34A", bold=True)
         elif status.lower().startswith("en cours"):
-            status_cell.font = Font(color="D97706", bold=True)
+            status_cell.font = Font(color="0878F9", bold=True)
         elif status.lower().startswith("erreur"):
-            status_cell.font = Font(color="DC2626", bold=True)
+            status_cell.font = Font(color="E51B23", bold=True)
 
         cls._save_workbook_atomic(wb, path)
         wb.close()
@@ -250,7 +250,7 @@ class ExcelManager:
         ws = wb.active
         ws.title = "Résultats Backblaze"
 
-        header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        header_fill = PatternFill(start_color="102A5E", end_color="102A5E", fill_type="solid")
         header_font = Font(color="FFFFFF", bold=True, size=11)
         thin_border = Border(
             left=Side(style="thin", color="D9D9D9"),
@@ -314,7 +314,7 @@ class ExcelManager:
         ws = wb.active
         ws.title = "Dossiers"
 
-        header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        header_fill = PatternFill(start_color="102A5E", end_color="102A5E", fill_type="solid")
         header_font = Font(color="FFFFFF", bold=True, size=11)
 
         headers = ["Dossier", "Statut"]

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520">
+<defs>
+ <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#12B7F5"/><stop offset="1" stop-color="#0878F9"/></linearGradient>
+ <linearGradient id="deep" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0878F9"/><stop offset="1" stop-color="#102A5E"/></linearGradient>
+</defs>
+<rect width="1200" height="520" fill="#FFFFFF"/>
+<!-- cloud outline -->
+<path d="M205 235 C157 235 123 200 123 157 C123 114 157 80 201 80 C221 28 273 8 322 24 C359 36 382 64 390 94 C443 91 484 130 484 178 C484 220 450 253 408 253 L210 253"
+ fill="none" stroke="url(#blue)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+<!-- sync arrows -->
+<path d="M190 290 C150 324 143 381 170 420" fill="none" stroke="url(#deep)" stroke-width="19" stroke-linecap="round"/>
+<path d="M147 405 L172 432 L190 397" fill="none" stroke="url(#deep)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M416 291 C454 324 463 377 438 414" fill="none" stroke="url(#deep)" stroke-width="19" stroke-linecap="round"/>
+<path d="M418 406 L437 427 L461 399" fill="none" stroke="url(#deep)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+<!-- database -->
+<ellipse cx="305" cy="246" rx="94" ry="31" fill="url(#blue)"/>
+<path d="M211 246 V353 C211 371 253 386 305 386 C357 386 399 371 399 353 V246" fill="url(#deep)"/>
+<path d="M211 282 C211 300 253 315 305 315 C357 315 399 300 399 282" fill="none" stroke="#FFFFFF" stroke-width="8"/>
+<path d="M211 320 C211 338 253 353 305 353 C357 353 399 338 399 320" fill="none" stroke="#FFFFFF" stroke-width="8"/>
+<ellipse cx="305" cy="246" rx="94" ry="31" fill="url(#blue)" stroke="#FFFFFF" stroke-width="5"/>
+<!-- upload cloud and arrow -->
+<path d="M267 245 C250 245 241 233 241 219 C241 205 252 194 266 194 C272 175 290 166 307 173 C320 178 327 188 330 201 C347 201 360 214 360 229 C360 240 351 247 339 247 Z" fill="#FFFFFF"/>
+<path d="M305 237 V211 M287 228 L305 209 L323 228" fill="none" stroke="#0878F9" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+<!-- red flame -->
+<path d="M182 122 C202 97 191 80 204 64 C226 92 230 109 215 126 C232 132 239 149 230 163 C220 181 192 181 179 165 C165 149 171 135 182 122Z" fill="#E51B23"/>
+<!-- wordmark -->
+<text x="530" y="156" font-family="Arial, Helvetica, sans-serif" font-size="64" font-weight="700" fill="#102A5E">Sauvegarde</text>
+<text x="530" y="225" font-family="Arial, Helvetica, sans-serif" font-size="64" font-weight="700" fill="#102A5E">Automatisée</text>
+<text x="530" y="307" font-family="Arial, Helvetica, sans-serif" font-size="68" font-weight="800" fill="#E51B23">Backblaze B2</text>
+<path d="M530 340 H1000" stroke="#0878F9" stroke-width="8" stroke-linecap="round"/>
+<text x="530" y="388" font-family="Arial, Helvetica, sans-serif" font-size="27" fill="#526078">Vos fichiers, sauvegardés automatiquement.</text>
+</svg>

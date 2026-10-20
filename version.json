@@ -1,13 +1,14 @@
 {
-    "version": "1.2.0",
+    "version": "1.3.0",
     "published_at": "2026-10-20",
-    "description": "Protection anti-coupure de courant (écriture Excel atomique + .bak), mise en pause/reprise automatique sur coupure Internet prolongée, enregistrement temps réel fichier par fichier, et mise à jour à distance via GitHub.",
+    "description": "Intégration complète de la Charte Graphique et du Pack d'Identité Visuelle (palette officielle #102A5E / #0878F9 / #12B7F5 / #E51B23, logos et icônes officiels, layout Dashboard avec barre latérale et cartes KPI).",
     "files": [
         "version.json",
         "app.py",
         "b2_uploader.py",
         "excel_manager.py",
         "config_manager.py",
-        "auto_updater.py"
+        "auto_updater.py",
+        "generate_icon.py"
     ]
 }

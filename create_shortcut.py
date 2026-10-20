@@ -30,7 +30,7 @@ foreach ($lnk in $ShortcutPaths) {{
     $Shortcut.IconLocation = "{ico_path},0"
     $Shortcut.Description = "Sauvegarde Automatisée Backblaze B2 — Vos fichiers, sauvegardés automatiquement."
     $Shortcut.Save()
-    Write-Output "Raccourci créé : $lnk -> $({target_path})"
+    Write-Output "Raccourci créé : $lnk -> {target_path}"
 }}
 ie4uinit.exe -show
 """

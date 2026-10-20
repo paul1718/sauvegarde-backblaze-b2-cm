@@ -1,9 +1,10 @@
 import os
 import re
+import socket
 import time
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Set
+from typing import Callable, Dict, List, Optional, Tuple, Set, Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from b2sdk.v2 import InMemoryAccountInfo, B2Api
@@ -38,12 +39,30 @@ def format_size(num_bytes: float) -> str:
 def normalize_b2_url(raw_url: str) -> str:
     """S'assure que l'URL publique Backblaze B2 est proprement encodée (espaces, accents)."""
     parts = urlsplit(raw_url)
-    # Si le chemin n'est pas déjà encodé avec %, on encode proprement chaque segment
     if "%" not in parts.path:
         encoded_path = "/".join(quote(seg, safe="") for seg in parts.path.split("/"))
     else:
         encoded_path = parts.path
     return urlunsplit((parts.scheme, parts.netloc, encoded_path, parts.query, parts.fragment))
+
+
+def is_internet_connected(timeout: float = 3.0) -> bool:
+    """
+    Vérifie si la connexion Internet est active en testant plusieurs cibles fiables
+    (API Backblaze B2, Cloudflare DNS 1.1.1.1, Google DNS 8.8.8.8).
+    """
+    targets = [
+        ("api.backblazeb2.com", 443),
+        ("1.1.1.1", 443),
+        ("8.8.8.8", 53),
+    ]
+    for host, port in targets:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 class UploadCancelledError(Exception):
@@ -54,7 +73,8 @@ class UploadCancelledError(Exception):
 class B2UploaderService:
     """
     Service gérant la connexion à Backblaze B2, le parcours récursif des dossiers,
-    la reprise sur micro-coupures réseau (retry exponentiel) et la génération des liens publics.
+    la mise en pause automatique en cas de coupure Internet avec reprise dès le retour du réseau,
+    et la sauvegarde au fil de l'eau.
     """
 
     def __init__(
@@ -63,7 +83,7 @@ class B2UploaderService:
         app_key: str,
         bucket_name: str,
         log_callback: Optional[Callable[[str, str], None]] = None,
-        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        status_callback: Optional[Callable[[str], None]] = None,
         pause_event: Optional[threading.Event] = None,
         stop_event: Optional[threading.Event] = None,
     ) -> None:
@@ -71,8 +91,7 @@ class B2UploaderService:
         self.app_key = app_key.strip()
         self.bucket_name = bucket_name.strip()
         self.log_callback = log_callback
-        self.progress_callback = progress_callback
-        # pause_event: set() = en cours d'exécution, clear() = en pause
+        self.status_callback = status_callback
         self.pause_event = pause_event or threading.Event()
         if pause_event is None:
             self.pause_event.set()
@@ -86,23 +105,67 @@ class B2UploaderService:
         if self.log_callback:
             self.log_callback(message, level)
 
+    def _status(self, text: str) -> None:
+        if self.status_callback:
+            self.status_callback(text)
+
     def _check_pause_and_stop(self) -> None:
         """Vérifie si l'utilisateur a mis en pause ou arrêté le processus."""
         if self.stop_event.is_set():
             raise UploadCancelledError("Sauvegarde interrompue par l'utilisateur.")
         if not self.pause_event.is_set():
-            self._log("Sauvegarde en pause. En attente de reprise...", "WARN")
+            self._log("Sauvegarde en pause manuelle. En attente de reprise...", "WARN")
             while not self.pause_event.is_set():
                 if self.stop_event.is_set():
                     raise UploadCancelledError("Sauvegarde interrompue par l'utilisateur.")
                 time.sleep(0.25)
             self._log("Reprise de la sauvegarde...", "INFO")
 
-    def connect(self, max_retries: int = 5) -> None:
-        """Authentifie le compte Backblaze B2 et récupère le Bucket avec gestion de retry."""
-        last_error: Optional[Exception] = None
-        for attempt in range(1, max_retries + 1):
+    def _wait_for_internet_if_down(self, context_msg: str = "") -> bool:
+        """
+        Si la connexion Internet est coupée, met automatiquement la sauvegarde en pause
+        et attend patiemment que la connexion revienne (même si la coupure dure plusieurs heures).
+        Retourne True si une attente réseau a eu lieu.
+        """
+        self._check_pause_and_stop()
+        if is_internet_connected():
+            return False
+
+        prefix = f"({context_msg}) " if context_msg else ""
+        self._log(
+            f"📡 {prefix}Connexion Internet coupée. Mise en pause automatique en attente du retour d'Internet...",
+            "WARN",
+        )
+        self._status("📡 Connexion Internet coupée — En pause automatique (reprise dès le retour du réseau)...")
+
+        waited_seconds = 0
+        while not is_internet_connected():
             self._check_pause_and_stop()
+            self._sleep_interruptible(5.0)
+            waited_seconds += 5
+            if waited_seconds % 60 == 0:
+                mins = waited_seconds // 60
+                self._status(
+                    f"📡 En attente de la connexion Internet ({mins} min écoulées)... Reprise automatique dès le retour."
+                )
+
+        self._log("🌐 Connexion Internet rétablie ! Reconnexion à Backblaze B2 et reprise automatique...", "SUCCESS")
+        self._status("🌐 Connexion Internet rétablie ! Reprise du téléversement...")
+        return True
+
+    def connect(self, max_auth_retries: int = 5) -> None:
+        """
+        Authentifie le compte Backblaze B2 et récupère le Bucket.
+        Attend indéfiniment si Internet est coupé, mais échoue rapidement si les identifiants B2 sont invalides.
+        """
+        last_error: Optional[Exception] = None
+        attempt = 0
+        while attempt < max_auth_retries:
+            self._check_pause_and_stop()
+            # Si Internet est coupé, on attend son retour sans consommer les tentatives d'authentification
+            self._wait_for_internet_if_down("Connexion B2")
+
+            attempt += 1
             try:
                 self.info = InMemoryAccountInfo()
                 self.b2_api = B2Api(self.info)
@@ -113,10 +176,14 @@ class B2UploaderService:
                 raise
             except Exception as e:
                 last_error = e
-                if attempt < max_retries:
-                    wait_sec = min(2 ** attempt, 30)
+                # Si la coupure Internet vient juste de se produire pendant l'appel
+                if not is_internet_connected():
+                    attempt -= 1  # Ne pas pénaliser une coupure Internet
+                    continue
+                if attempt < max_auth_retries:
+                    wait_sec = min(2 ** attempt, 20)
                     self._log(
-                        f"Tentative de connexion B2 ({attempt}/{max_retries}) échouée : {e}. Nouvel essai dans {wait_sec}s...",
+                        f"Tentative de connexion B2 ({attempt}/{max_auth_retries}) échouée : {e}. Nouvel essai dans {wait_sec}s...",
                         "WARN",
                     )
                     self._sleep_interruptible(wait_sec)
@@ -142,12 +209,10 @@ class B2UploaderService:
         folder_name = folder_path.name
 
         for root, dirs, files in os.walk(folder_path):
-            # Tri des sous-dossiers pour un parcours déterministe
             dirs.sort(key=lambda d: d.lower())
             root_path = Path(root)
             is_root = root_path.resolve() == folder_path.resolve()
 
-            # Tri naturel des fichiers du répertoire courant
             file_paths = [root_path / f for f in files]
             file_paths.sort(key=natural_sort_key)
 
@@ -163,7 +228,7 @@ class B2UploaderService:
     def _fetch_existing_b2_files(self, folder_name: str) -> Dict[str, int]:
         """
         Récupère la liste des fichiers déjà présents sur B2 dans `folder_name/`
-        avec leur taille en octets pour accélérer les reprises après interruption.
+        avec leur taille en octets pour accélérer les reprises après interruption ou coupure de courant.
         """
         existing: Dict[str, int] = {}
         if not self.bucket:
@@ -173,80 +238,108 @@ class B2UploaderService:
             for file_version, _ in self.bucket.ls(folder_to_list=prefix, recursive=True):
                 existing[file_version.file_name] = int(file_version.size)
         except Exception:
-            # Si le listage échoue, on téléversera normalement sans bloquer
             pass
         return existing
 
-    def _upload_single_file_with_retry(
+    def _upload_single_file_resilient(
         self,
         local_path: Path,
         b2_key: str,
-        existing_files: Dict[str, int],
-        max_retries: int = 8,
-    ) -> str:
+        existing_b2_files: Dict[str, int],
+        local_journal_files: Dict[str, Any],
+        max_consecutive_server_errors: int = 12,
+    ) -> Tuple[str, bool]:
         """
-        Téléverse un fichier sur Backblaze B2 avec politique de retry robuste
-        et retourne son URL publique.
+        Téléverse un fichier sur Backblaze B2 avec résilience totale aux coupures Internet :
+        - Si le fichier est déjà dans le journal local ou sur B2 avec la même taille, récupère son lien sans re-téléverser.
+        - Si Internet coupe en plein transfert, se met en pause automatique et reprend dès que la connexion revient.
+        Retourne (url_publique, etait_deja_present).
         """
         self._check_pause_and_stop()
         local_size = local_path.stat().st_size
 
-        # Si le fichier existe déjà sur B2 avec exactement la même taille (reprise après coupure)
-        if b2_key in existing_files and existing_files[b2_key] == local_size:
-            raw_url = self.bucket.get_download_url(b2_key)
-            return normalize_b2_url(raw_url)
+        # 1. Vérification dans le journal local anti-coupure de courant
+        if b2_key in local_journal_files:
+            entry = local_journal_files[b2_key]
+            if isinstance(entry, dict) and entry.get("size") == local_size and entry.get("url"):
+                return str(entry["url"]), True
 
+        # 2. Vérification sur le bucket Backblaze B2
+        if b2_key in existing_b2_files and existing_b2_files[b2_key] == local_size:
+            raw_url = self.bucket.get_download_url(b2_key)
+            return normalize_b2_url(raw_url), True
+
+        consecutive_errors = 0
         last_err: Optional[Exception] = None
-        for attempt in range(1, max_retries + 1):
+
+        while consecutive_errors < max_consecutive_server_errors:
             self._check_pause_and_stop()
+            # Si Internet est coupé, attend son retour indéfiniment
+            if self._wait_for_internet_if_down(local_path.name):
+                try:
+                    self.connect(max_auth_retries=5)
+                except UploadCancelledError:
+                    raise
+                except Exception:
+                    pass
+
             try:
                 if self.bucket is None:
-                    self.connect(max_retries=3)
+                    self.connect(max_auth_retries=5)
 
                 self.bucket.upload_local_file(
                     local_file=str(local_path),
                     file_name=b2_key,
                 )
                 raw_url = self.bucket.get_download_url(b2_key)
-                return normalize_b2_url(raw_url)
+                return normalize_b2_url(raw_url), False
 
             except UploadCancelledError:
                 raise
             except (B2Error, OSError, Exception) as e:
                 last_err = e
-                if attempt < max_retries:
-                    wait_sec = min(3 * (2 ** (attempt - 1)), 60)
-                    self._log(
-                        f"Micro-coupure ou erreur réseau sur '{local_path.name}' "
-                        f"(tentative {attempt}/{max_retries}) : {e}. "
-                        f"Nouvel essai dans {wait_sec}s...",
-                        "WARN",
-                    )
-                    self._sleep_interruptible(wait_sec)
-                    # Ré-authentification préventive en cas d'expiration de jeton B2 sur de très longs transferts
+                # Si la coupure Internet est la cause de l'erreur, on passe en pause réseau sans incrémenter le compteur d'échec fatal
+                if not is_internet_connected():
+                    self._wait_for_internet_if_down(local_path.name)
                     try:
-                        self.connect(max_retries=2)
+                        self.connect(max_auth_retries=5)
                     except UploadCancelledError:
                         raise
                     except Exception:
                         pass
+                    continue
+
+                consecutive_errors += 1
+                wait_sec = min(3 * (2 ** min(consecutive_errors - 1, 4)), 45)
+                self._log(
+                    f"Micro-coupure ou erreur temporaire sur '{local_path.name}' "
+                    f"(essai {consecutive_errors}/{max_consecutive_server_errors}) : {e}. "
+                    f"Nouvelle tentative dans {wait_sec}s...",
+                    "WARN",
+                )
+                self._sleep_interruptible(wait_sec)
+                try:
+                    self.connect(max_auth_retries=3)
+                except UploadCancelledError:
+                    raise
+                except Exception:
+                    pass
 
         raise RuntimeError(
-            f"Échec du téléversement de '{local_path.name}' après {max_retries} tentatives : {last_err}"
+            f"Échec du téléversement de '{local_path.name}' après {max_consecutive_server_errors} essais : {last_err}"
         )
 
     def upload_folder(
         self,
         folder_path: Path,
-        on_file_uploaded: Optional[Callable[[int, Path], None]] = None,
+        local_journal_files: Optional[Dict[str, Any]] = None,
+        on_file_uploaded: Optional[Callable[[int, Path, str, str], None]] = None,
+        on_root_links_updated: Optional[Callable[[List[str], List[str], int, int], None]] = None,
     ) -> Tuple[List[str], List[str], int, int]:
         """
         Téléverse l'intégralité d'un dossier (et tous ses sous-dossiers) vers Backblaze B2.
-        Retourne :
-        - root_image_links : jusqu'aux 10 premiers liens d'images situées à la racine
-        - root_video_links : jusqu'aux 5 premiers liens de vidéos situées à la racine
-        - total_files_uploaded : nombre total de fichiers traités dans ce dossier
-        - total_bytes_uploaded : volume total d'octets traités dans ce dossier
+        Appelle `on_root_links_updated` au fil de l'eau dès qu'un média racine est téléversé
+        afin d'enregistrer immédiatement le fichier Excel de sortie.
         """
         self._check_pause_and_stop()
         if not folder_path.exists() or not folder_path.is_dir():
@@ -254,6 +347,7 @@ class B2UploaderService:
 
         eligible_files = self.scan_folder_files(folder_path)
         existing_b2 = self._fetch_existing_b2_files(folder_path.name)
+        journal_map = local_journal_files if isinstance(local_journal_files, dict) else {}
 
         root_image_links: List[str] = []
         root_video_links: List[str] = []
@@ -265,13 +359,17 @@ class B2UploaderService:
             file_size = local_path.stat().st_size
             ext = local_path.suffix.lower()
 
-            already_on_b2 = b2_key in existing_b2 and existing_b2[b2_key] == file_size
-            url = self._upload_single_file_with_retry(local_path, b2_key, existing_b2)
+            url, already_present = self._upload_single_file_resilient(
+                local_path=local_path,
+                b2_key=b2_key,
+                existing_b2_files=existing_b2,
+                local_journal_files=journal_map,
+            )
             total_bytes += file_size
 
-            if already_on_b2:
+            if already_present:
                 self._log(
-                    f"  ✓ [{idx}/{total_files}] Déjà sur B2 : {b2_key} ({format_size(file_size)})",
+                    f"  ✓ [{idx}/{total_files}] Déjà sauvegardé : {b2_key} ({format_size(file_size)})",
                     "INFO",
                 )
             else:
@@ -280,17 +378,20 @@ class B2UploaderService:
                     "SUCCESS",
                 )
 
-            # Règle métier C : Seuls les fichiers à la racine du dossier (hors documents)
-            # sont ajoutés à l'Excel de sortie (max 10 images, max 5 vidéos)
+            root_updated = False
             if is_root:
                 if ext in IMAGE_EXTENSIONS and len(root_image_links) < 10:
                     root_image_links.append(url)
+                    root_updated = True
                 elif ext in VIDEO_EXTENSIONS and len(root_video_links) < 5:
                     root_video_links.append(url)
-                # Les documents (.txt, .pdf, .doc, .docx, .csv, .rtf) sont bien téléversés
-                # mais leurs liens ne doivent pas figurer dans l'Excel de sortie.
+                    root_updated = True
 
             if on_file_uploaded:
-                on_file_uploaded(file_size, local_path)
+                on_file_uploaded(file_size, local_path, b2_key, url)
+
+            # Enregistrement progressif de l'Excel final au fur et à mesure des téléversements
+            if (root_updated or idx == total_files) and on_root_links_updated:
+                on_root_links_updated(root_image_links, root_video_links, idx, total_files)
 
         return root_image_links, root_video_links, total_files, total_bytes

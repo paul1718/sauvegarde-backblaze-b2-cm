@@ -2,11 +2,22 @@ import os
 import sys
 import time
 import queue
+import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Optional, List, Dict, Any
+
+# Permet à l'exécutable PyInstaller (.exe) sur un PC distant (sans Python installé)
+# de charger en priorité les fichiers .py mis à jour à distance depuis GitHub :
+if getattr(sys, "frozen", False):
+    _exe_dir = Path(sys.executable).resolve().parent
+    if str(_exe_dir) not in sys.path:
+        sys.path.insert(0, str(_exe_dir))
+    _proj_root = _exe_dir.parent.parent
+    if (_proj_root / "version.json").exists() and str(_proj_root) not in sys.path:
+        sys.path.insert(0, str(_proj_root))
 
 import customtkinter as ctk
 
@@ -17,6 +28,7 @@ from b2_uploader import (
     UploadCancelledError,
     format_size,
 )
+from auto_updater import AutoUpdater
 
 
 ctk.set_appearance_mode("System")
@@ -29,9 +41,12 @@ class BackblazeUploaderApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
 
-        self.title("Sauvegarde Automatisée Backblaze B2")
-        self.geometry("980x780")
-        self.minsize(880, 700)
+        self.updater = AutoUpdater()
+        self.current_version = self.updater.get_local_version()
+
+        self.title(f"Sauvegarde Automatisée Backblaze B2 — v{self.current_version}")
+        self.geometry("1000x800")
+        self.minsize(900, 720)
 
         # Chargement de l'icône de l'application
         icon_path = get_app_dir() / "assets" / "app_icon.ico"
@@ -46,7 +61,7 @@ class BackblazeUploaderApp(ctk.CTk):
         self.config_manager = ConfigManager()
         self.saved_config = self.config_manager.load()
 
-        # File d'attente thread-safe pour les mises à jour de l'interface (logs, progression, états)
+        # File d'attente thread-safe pour les mises à jour de l'interface
         self.ui_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
 
         # Événements de contrôle du thread de téléversement
@@ -66,6 +81,12 @@ class BackblazeUploaderApp(ctk.CTk):
         # Boucle de rafraîchissement de la file UI
         self.after(100, self._process_ui_queue)
 
+        # Vérification silencieuse des mises à jour à distance au démarrage
+        self.after(800, lambda: self._check_remote_updates(silent=True))
+
+        # Vérification de reprise automatique après coupure brusque de courant
+        self.after(1500, self._check_power_loss_auto_resume)
+
         # Fermeture propre de l'application
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -74,25 +95,37 @@ class BackblazeUploaderApp(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
 
-        # En-tête de l'application
+        # En-tête de l'application + bouton de mise à jour à distance
         header_frame = ctk.CTkFrame(self, corner_radius=10, fg_color=("gray88", "gray17"))
         header_frame.grid(row=0, column=0, padx=16, pady=(14, 6), sticky="ew")
         header_frame.grid_columnconfigure(0, weight=1)
 
         title_lbl = ctk.CTkLabel(
             header_frame,
-            text="☁️  Sauvegarde Automatisée Backblaze B2",
+            text=f"☁️  Sauvegarde Automatisée Backblaze B2  (v{self.current_version})",
             font=ctk.CTkFont(size=20, weight="bold"),
         )
         title_lbl.grid(row=0, column=0, padx=16, pady=(10, 2), sticky="w")
 
         subtitle_lbl = ctk.CTkLabel(
             header_frame,
-            text="Téléversement massif de dossiers médias avec reprise automatique et génération des liens Excel",
+            text="Protection anti-coupure de courant • Pause/Reprise auto sur coupure Internet • Sauvegarde Excel en temps réel",
             font=ctk.CTkFont(size=12),
             text_color=("gray35", "gray70"),
         )
         subtitle_lbl.grid(row=1, column=0, padx=16, pady=(0, 10), sticky="w")
+
+        self.update_btn = ctk.CTkButton(
+            header_frame,
+            text="🔄 Vérifier mise à jour",
+            width=165,
+            height=32,
+            fg_color=("gray75", "gray28"),
+            text_color=("gray10", "gray90"),
+            hover_color=("gray65", "gray38"),
+            command=lambda: self._check_remote_updates(silent=False),
+        )
+        self.update_btn.grid(row=0, column=1, rowspan=2, padx=16, pady=10, sticky="e")
 
         # =========================================================================
         # SECTION 1 : Configuration / Identifiants Backblaze B2
@@ -247,7 +280,7 @@ class BackblazeUploaderApp(ctk.CTk):
             text="▶  Lancer la Sauvegarde",
             font=ctk.CTkFont(size=14, weight="bold"),
             height=38,
-             width=210,
+            width=210,
             fg_color="#16A34A",
             hover_color="#15803D",
             command=self._start_backup,
@@ -388,10 +421,13 @@ class BackblazeUploaderApp(ctk.CTk):
         self.parent_dir_var.set(self.saved_config.get("parent_dir", ""))
         self.source_excel_var.set(self.saved_config.get("source_excel", ""))
         self.output_excel_var.set(self.saved_config.get("output_excel", ""))
-        self._append_log("Application initialisée. Configuration chargée automatiquement.", "INFO")
+        self._append_log(
+            f"Application v{self.current_version} initialisée. Configuration et journal anti-coupure chargés.",
+            "INFO",
+        )
 
     def _save_current_config(self) -> None:
-        """Sauvegarde les valeurs actuelles des champs dans config.json."""
+        """Sauvegarde atomique des valeurs actuelles dans config.json."""
         data = {
             "b2_key_id": self.key_id_var.get().strip(),
             "b2_app_key": self.app_key_var.get().strip(),
@@ -399,6 +435,7 @@ class BackblazeUploaderApp(ctk.CTk):
             "parent_dir": self.parent_dir_var.get().strip(),
             "source_excel": self.source_excel_var.get().strip(),
             "output_excel": self.output_excel_var.get().strip(),
+            "auto_resume_after_power_loss": True,
         }
         self.config_manager.save(data)
 
@@ -409,6 +446,81 @@ class BackblazeUploaderApp(ctk.CTk):
         else:
             self.app_key_entry.configure(show="•")
             self.show_key_btn.configure(text="Afficher")
+
+    # =========================================================================
+    # Reprise automatique après coupure brusque d'électricité
+    # =========================================================================
+    def _check_power_loss_auto_resume(self) -> None:
+        """
+        Vérifie si une session était active lors d'une coupure brusque de courant.
+        Si oui, reprend automatiquement la sauvegarde là où elle s'était arrêtée.
+        """
+        state = self.config_manager.load_state_journal()
+        if not state.get("active_session", False):
+            return
+
+        key_id = self.key_id_var.get().strip()
+        app_key = self.app_key_var.get().strip()
+        bucket = self.bucket_var.get().strip()
+        parent_dir = self.parent_dir_var.get().strip()
+        source_excel = self.source_excel_var.get().strip()
+
+        if key_id and app_key and bucket and os.path.isdir(parent_dir) and os.path.isfile(source_excel):
+            last_folder = state.get("current_folder", "")
+            self._append_log(
+                f"⚡ Détection d'une interruption brusque (coupure de courant) sur la session précédente "
+                f"(dernier dossier en cours : '{last_folder}'). Reprise automatique immédiate !",
+                "WARN",
+            )
+            self.status_label.configure(
+                text="⚡ Reprise automatique suite à une coupure de courant..."
+            )
+            self.after(1200, self._start_backup)
+
+    # =========================================================================
+    # Mise à jour à distance via GitHub (pour postes distants)
+    # =========================================================================
+    def _check_remote_updates(self, silent: bool = False) -> None:
+        if not silent:
+            self.update_btn.configure(state="disabled", text="Vérification...")
+
+        def _worker() -> None:
+            res = self.updater.check_for_updates()
+            self.ui_queue.put({"type": "update_check_result", "result": res, "silent": silent})
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_remote_update_now(self, files: List[str], remote_version: str) -> None:
+        self.update_btn.configure(state="disabled", text="Mise à jour...")
+        self._append_log(f"🔄 Téléchargement de la mise à jour distante v{remote_version} depuis GitHub...", "INFO")
+
+        def _worker() -> None:
+            ok, msg = self.updater.apply_update(files)
+            self.ui_queue.put(
+                {
+                    "type": "update_applied",
+                    "success": ok,
+                    "message": msg,
+                    "remote_version": remote_version,
+                }
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _restart_application(self) -> None:
+        """Relance proprement l'application après une mise à jour à distance."""
+        self._save_current_config()
+        try:
+            app_py = get_app_dir() / "app.py"
+            if app_py.exists():
+                pythonw = Path(sys.executable).with_name("pythonw.exe")
+                runner = str(pythonw) if pythonw.exists() else sys.executable
+                subprocess.Popen([runner, str(app_py)], cwd=str(get_app_dir()))
+            else:
+                subprocess.Popen([sys.executable] + sys.argv, cwd=str(get_app_dir()))
+        except Exception:
+            pass
+        self.destroy()
 
     # =========================================================================
     # Sélecteurs de fichiers / répertoires
@@ -495,7 +607,7 @@ class BackblazeUploaderApp(ctk.CTk):
         if not output_path or not os.path.exists(output_path):
             messagebox.showinfo(
                 "Fichier non disponible",
-                "Le fichier Excel de sortie n'existe pas encore. Il sera généré dès le premier dossier sauvegardé.",
+                "Le fichier Excel de sortie n'existe pas encore. Il sera généré dès le premier fichier média sauvegardé.",
             )
             return
         try:
@@ -525,7 +637,7 @@ class BackblazeUploaderApp(ctk.CTk):
         def _worker() -> None:
             try:
                 service = B2UploaderService(key_id, app_key, bucket)
-                service.connect(max_retries=1)
+                service.connect(max_auth_retries=1)
                 self.ui_queue.put(
                     {
                         "type": "conn_test_result",
@@ -558,7 +670,6 @@ class BackblazeUploaderApp(ctk.CTk):
         source_excel = self.source_excel_var.get().strip()
         output_excel = self.output_excel_var.get().strip()
 
-        # Validations claires pour l'utilisateur
         if not key_id or not app_key or not bucket_name:
             messagebox.showwarning(
                 "Identifiants Backblaze B2 requis",
@@ -586,7 +697,9 @@ class BackblazeUploaderApp(ctk.CTk):
 
         self._save_current_config()
 
-        # Préparation de l'état d'exécution
+        # Marquage de session active pour la reprise automatique en cas de coupure de courant
+        self.config_manager.mark_session_active(True)
+
         self.is_running = True
         self.pause_event.set()
         self.stop_event.clear()
@@ -623,12 +736,13 @@ class BackblazeUploaderApp(ctk.CTk):
         resp = messagebox.askyesno(
             "Interrompre la sauvegarde",
             "Voulez-vous interrompre la sauvegarde en cours ?\n\n"
-            "Tous les dossiers déjà terminés sont enregistrés et la sauvegarde reprendra automatiquement là où elle s'est arrêtée au prochain lancement.",
+            "Tous les fichiers déjà envoyés sont enregistrés et la sauvegarde reprendra exactement là où elle s'est arrêtée au prochain lancement.",
         )
         if not resp:
             return
+        self.config_manager.mark_session_active(False)
         self.stop_event.set()
-        self.pause_event.set()  # Débloque le thread s'il était en pause
+        self.pause_event.set()
         self.stop_btn.configure(state="disabled")
         self.status_label.configure(text="Arrêt en cours...")
         self._append_log("Interruption demandée par l'utilisateur. Arrêt propre en cours...", "WARN")
@@ -678,7 +792,7 @@ class BackblazeUploaderApp(ctk.CTk):
             self._queue_log(f"Fichier Source    : {source_excel}", "INFO")
             self._queue_log(f"Fichier Sortie    : {output_excel}", "INFO")
 
-            # 1. Lecture du fichier Excel source
+            # 1. Lecture sécurisée du fichier Excel source (avec auto-réparation .bak si nécessaire)
             folders_info = ExcelManager.read_source_folders(source_excel)
             total_listed = len(folders_info)
             already_completed = [f for f in folders_info if f["completed"]]
@@ -694,6 +808,7 @@ class BackblazeUploaderApp(ctk.CTk):
                 self._queue_log(f"⏭ Dossier ignoré (Statut = Terminé) : {skipped['dossier']}", "INFO")
 
             if not pending_folders:
+                self.config_manager.mark_session_active(False)
                 self._queue_progress(
                     folders_done=total_listed,
                     folders_total=total_listed,
@@ -708,7 +823,7 @@ class BackblazeUploaderApp(ctk.CTk):
                 self.ui_queue.put({"type": "finished", "cancelled": False, "error": None})
                 return
 
-            # 2. Pré-calcul du nombre total de fichiers et du volume à transférer pour la barre de progression globale
+            # 2. Pré-calcul du nombre total de fichiers et du volume à transférer
             self._queue_status("Analyse de l'arborescence et calcul du volume à sauvegarder...")
             total_files_all = 0
             total_bytes_all = 0
@@ -735,6 +850,7 @@ class BackblazeUploaderApp(ctk.CTk):
                 valid_pending.append(item)
 
             if not valid_pending:
+                self.config_manager.mark_session_active(False)
                 self._queue_log(
                     "Aucun des dossiers à traiter n'a été trouvé dans le Répertoire Parent sélectionné.",
                     "WARN",
@@ -754,13 +870,14 @@ class BackblazeUploaderApp(ctk.CTk):
                 "INFO",
             )
 
-            # 3. Connexion à Backblaze B2
+            # 3. Connexion à Backblaze B2 (avec attente automatique si Internet est coupé)
             self._queue_status(f"Connexion au bucket Backblaze B2 '{bucket_name}'...")
             uploader = B2UploaderService(
                 key_id=key_id,
                 app_key=app_key,
                 bucket_name=bucket_name,
                 log_callback=self._queue_log,
+                status_callback=self._queue_status,
                 pause_event=self.pause_event,
                 stop_event=self.stop_event,
             )
@@ -771,6 +888,9 @@ class BackblazeUploaderApp(ctk.CTk):
             folders_done_count = len(already_completed)
             files_done_count = 0
             bytes_done_count = 0
+
+            state_journal = self.config_manager.load_state_journal()
+            local_journal_files: Dict[str, Any] = state_journal.get("uploaded_files", {})
 
             self._queue_progress(
                 folders_done=folders_done_count,
@@ -788,6 +908,8 @@ class BackblazeUploaderApp(ctk.CTk):
                 row_index = item["row_index"]
                 folder_path: Path = item["folder_path"]
 
+                self.config_manager.mark_session_active(True, current_folder=dossier_name)
+
                 self._queue_log("-" * 64, "INFO")
                 self._queue_log(
                     f"📁 [{idx}/{len(valid_pending)}] Traitement du dossier : '{dossier_name}' "
@@ -796,10 +918,23 @@ class BackblazeUploaderApp(ctk.CTk):
                 )
                 self._queue_status(f"Téléversement du dossier : {dossier_name} ({idx}/{len(valid_pending)})")
 
-                def _on_file_done(file_size: int, file_path: Path) -> None:
+                # Marquer "En cours" dans l'Excel source de manière atomique
+                ExcelManager.update_source_status(
+                    source_path=source_excel,
+                    row_index=row_index,
+                    dossier_name=dossier_name,
+                    status="En cours",
+                )
+
+                def _on_file_done(file_size: int, file_path: Path, b2_key: str, url: str) -> None:
                     nonlocal files_done_count, bytes_done_count
                     files_done_count += 1
                     bytes_done_count += file_size
+
+                    # Enregistrement immédiat dans le journal anti-coupure de courant
+                    local_journal_files[b2_key] = {"size": int(file_size), "url": str(url)}
+                    self.config_manager.record_uploaded_file(b2_key, file_size, url)
+
                     if total_bytes_all > 0:
                         frac = min(bytes_done_count / total_bytes_all, 1.0)
                     elif total_files_all > 0:
@@ -818,13 +953,29 @@ class BackblazeUploaderApp(ctk.CTk):
                         fraction=frac,
                     )
 
+                def _on_root_links_updated(
+                    partial_imgs: List[str],
+                    partial_vids: List[str],
+                    file_idx_in_folder: int,
+                    total_in_folder: int,
+                ) -> None:
+                    # Enregistrement en temps réel (au fil de l'eau) du fichier Excel final de manière atomique
+                    ExcelManager.upsert_output_result(
+                        output_path=output_excel,
+                        dossier_name=dossier_name,
+                        image_links=partial_imgs,
+                        video_links=partial_vids,
+                    )
+
                 # Téléversement complet du dossier et de ses sous-dossiers
                 root_images, root_videos, uploaded_count, _ = uploader.upload_folder(
                     folder_path=folder_path,
+                    local_journal_files=local_journal_files,
                     on_file_uploaded=_on_file_done,
+                    on_root_links_updated=_on_root_links_updated,
                 )
 
-                # Consignation immédiate dans l'Excel de sortie (resultats_backblaze.xlsx)
+                # Consolidation finale de la ligne dans l'Excel de sortie
                 ExcelManager.upsert_output_result(
                     output_path=output_excel,
                     dossier_name=dossier_name,
@@ -832,12 +983,12 @@ class BackblazeUploaderApp(ctk.CTk):
                     video_links=root_videos,
                 )
                 self._queue_log(
-                    f"  📊 Excel de sortie mis à jour pour '{dossier_name}' "
+                    f"  📊 Excel de sortie consolidé pour '{dossier_name}' "
                     f"({len(root_images)} lien(s) image racine, {len(root_videos)} lien(s) vidéo racine).",
                     "INFO",
                 )
 
-                # Mise à jour immédiate du statut 'Terminé' dans l'Excel source (dossiers.xlsx)
+                # Mise à jour immédiate et atomique du statut 'Terminé' dans l'Excel source
                 ExcelManager.update_source_status(
                     source_path=source_excel,
                     row_index=row_index,
@@ -865,6 +1016,9 @@ class BackblazeUploaderApp(ctk.CTk):
                     f"✅ Dossier '{dossier_name}' intégralement téléversé et marqué 'Terminé' dans l'Excel source.",
                     "SUCCESS",
                 )
+
+            # Fin normale de tous les dossiers : désactivation du drapeau de coupure de courant
+            self.config_manager.mark_session_active(False, current_folder="")
 
             self._queue_progress(
                 folders_done=folders_done_count,
@@ -965,6 +1119,51 @@ class BackblazeUploaderApp(ctk.CTk):
                         self._append_log(f"❌ {msg['msg']}", "ERROR")
                         messagebox.showerror("Erreur de connexion Backblaze B2", msg["msg"])
 
+                elif msg_type == "update_check_result":
+                    self.update_btn.configure(state="normal", text="🔄 Vérifier mise à jour")
+                    res = msg["result"]
+                    silent = msg["silent"]
+                    if res.get("update_available"):
+                        remote_v = res["remote_version"]
+                        desc = res.get("description", "")
+                        self._append_log(
+                            f"✨ Nouvelle version v{remote_v} disponible sur GitHub ! ({desc})",
+                            "SUCCESS",
+                        )
+                        if not self.is_running:
+                            self._apply_remote_update_now(res["files"], remote_v)
+                        else:
+                            self.update_btn.configure(
+                                text=f"⬆ Installer v{remote_v}",
+                                fg_color="#2563EB",
+                                text_color="white",
+                                command=lambda: self._apply_remote_update_now(res["files"], remote_v),
+                            )
+                    elif not silent:
+                        if res.get("error"):
+                            messagebox.showwarning(
+                                "Vérification de mise à jour",
+                                f"Impossible de contacter GitHub pour vérifier les mises à jour :\n{res['error']}",
+                            )
+                        else:
+                            messagebox.showinfo(
+                                "Application à jour",
+                                f"Vous utilisez déjà la dernière version (v{res['local_version']}).",
+                            )
+
+                elif msg_type == "update_applied":
+                    self.update_btn.configure(state="normal", text="🔄 Vérifier mise à jour")
+                    if msg["success"]:
+                        rv = msg["remote_version"]
+                        self._append_log(
+                            f"✅ Mise à jour v{rv} installée avec succès ! Redémarrage de l'application...",
+                            "SUCCESS",
+                        )
+                        self.after(800, self._restart_application)
+                    else:
+                        self._append_log(f"❌ {msg['message']}", "ERROR")
+                        messagebox.showerror("Erreur de mise à jour", msg["message"])
+
                 elif msg_type == "finished":
                     self.is_running = False
                     self._set_controls_state(running=False, paused=False)
@@ -992,7 +1191,6 @@ class BackblazeUploaderApp(ctk.CTk):
         self.log_textbox.see("end")
         self.log_textbox.configure(state="disabled")
 
-        # Enregistrement dans le journal sur disque
         try:
             with open(self.log_file_path, "a", encoding="utf-8") as f:
                 f.write(formatted)

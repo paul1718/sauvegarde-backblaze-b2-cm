@@ -4,5 +4,10 @@ build/
 dist/
 *.log
 config.json
+state_journal.json
+*.bak
+*.tmp
+*_backup.xlsx
+.~tmp_*
 !$*.xlsx
 ~$*.xlsx

@@ -1,0 +1,13 @@
+{
+    "version": "1.2.0",
+    "published_at": "2026-10-20",
+    "description": "Protection anti-coupure de courant (écriture Excel atomique + .bak), mise en pause/reprise automatique sur coupure Internet prolongée, enregistrement temps réel fichier par fichier, et mise à jour à distance via GitHub.",
+    "files": [
+        "version.json",
+        "app.py",
+        "b2_uploader.py",
+        "excel_manager.py",
+        "config_manager.py",
+        "auto_updater.py"
+    ]
+}

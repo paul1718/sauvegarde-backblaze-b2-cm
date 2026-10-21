@@ -64,7 +64,7 @@ def safe_read_json(path: Path) -> Optional[Dict[str, Any]]:
 
 
 class ConfigManager:
-    """Gère la persistance atomique des identifiants B2, des chemins, de l'image standard TAV et de l'état de reprise."""
+    """Gère la persistance atomique des identifiants B2, du fichier Excel unique, de l'image standard TAV et de l'état de reprise."""
 
     DEFAULT_CONFIG: Dict[str, Any] = {
         "b2_key_id": "",
@@ -72,7 +72,6 @@ class ConfigManager:
         "bucket_name": "",
         "parent_dir": "",
         "source_excel": "",
-        "output_excel": "",
         "tav_standard_image_path": "",
         "tav_standard_image_url": "",
         "auto_resume_after_power_loss": True,
@@ -108,15 +107,10 @@ class ConfigManager:
             if default_src.exists():
                 config["source_excel"] = str(default_src)
 
-        if not config["output_excel"]:
-            default_out = self.app_dir / "resultats_backblaze.xlsx"
-            config["output_excel"] = str(default_out)
-
         return config
 
     def save(self, data: Dict[str, Any]) -> None:
         """Sauvegarde atomique de la configuration sur le disque (local + AppData)."""
-        # Conserver les clés existantes non fournies dans `data` (ex: tav_standard_image_url)
         existing = safe_read_json(self.local_config_path) or safe_read_json(self.appdata_config_path) or {}
         clean_data: Dict[str, Any] = {}
         for key, default_val in self.DEFAULT_CONFIG.items():
@@ -140,7 +134,7 @@ class ConfigManager:
             "active_session": False,
             "current_folder": "",
             "last_completed_row_in_run": 0,
-            "uploaded_files": {},  # b2_key -> {"size": int, "url": str}
+            "uploaded_files": {},
         }
         loaded = safe_read_json(self.local_state_path) or safe_read_json(self.appdata_state_path)
         if loaded:

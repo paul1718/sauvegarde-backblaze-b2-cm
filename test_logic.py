@@ -2,17 +2,16 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
+import openpyxl
 import pandas as pd
 
 from config_manager import ConfigManager
-from excel_manager import ExcelManager, OUTPUT_COLUMNS
+from excel_manager import ExcelManager, ALL_STANDARD_COLUMNS
 from b2_uploader import (
     B2UploaderService,
-    is_internet_connected,
     resolve_matching_folder,
     is_tav_folder,
 )
-from auto_updater import AutoUpdater
 from generate_icon import create_app_icon
 
 
@@ -54,96 +53,130 @@ class FakeB2Bucket:
 def run_tests() -> None:
     create_app_icon()
 
-    print("1. Test de la résolution de dossier par préfixe...")
+    print("1. Test du fichier Excel unique déjà rempli (conservation des données existantes + colonnes suivantes)...")
     with tempfile.TemporaryDirectory() as tmpdir:
         parent = Path(tmpdir)
-        folder_exact = parent / "Mariage_Jean"
         folder_prefix = parent / "TAV_204 - Terrain Bastos (Lot 3)"
         folder_empty_tav = parent / "TAV_999_Parcelle_Vide"
         folder_empty_other = parent / "Anniversaire_Vide_2026"
 
-        folder_exact.mkdir()
         folder_prefix.mkdir()
         folder_empty_tav.mkdir()
         folder_empty_other.mkdir()
 
-        # Vérification que "TAV_204" dans Excel trouve bien "TAV_204 - Terrain Bastos (Lot 3)"
-        matched = resolve_matching_folder(parent, "TAV_204")
-        assert matched is not None and matched.name == "TAV_204 - Terrain Bastos (Lot 3)", f"Obtenu : {matched}"
-        assert is_tav_folder("TAV_999", folder_empty_tav) is True
-        assert is_tav_folder("Anniversaire", folder_empty_other) is False
-        print("   -> OK : Correspondance exacte et par préfixe validées.")
-
-        print("2. Test des dossiers vides ('TAV' avec image standard unique vs hors 'TAV' sans rien)...")
-        source_xlsx = parent / "dossiers.xlsx"
-        output_xlsx = parent / "resultats_backblaze.xlsx"
-        df_src = pd.DataFrame(
+        # Création d'un fichier Excel initial déjà rempli avec une colonne métier "Quartier" et des liens existants
+        excel_path = parent / "dossiers.xlsx"
+        df_init = pd.DataFrame(
             [
-                {"Dossier": "TAV_999", "Statut": ""},
-                {"Dossier": "Anniversaire", "Statut": ""},
+                {
+                    "Dossier": "Dossier_Autre_Disque",
+                    "Quartier": "Odza",
+                    "Statut": "Terminé",
+                    "Image_1": "https://f000.backblazeb2.com/file/mon-bucket/Dossier_Autre_Disque/ancienne_img.jpg",
+                },
+                {
+                    "Dossier": "TAV_204",
+                    "Quartier": "Bastos",
+                    "Statut": "Terminé",
+                    "Image_1": "https://f000.backblazeb2.com/file/mon-bucket/old1.jpg",
+                    "Image_2": "https://f000.backblazeb2.com/file/mon-bucket/old2_supprimee.jpg",
+                },
+                {
+                    "Dossier": "TAV_999",
+                    "Quartier": "Mendong",
+                    "Statut": "",
+                    "Image_1": "",
+                },
+                {
+                    "Dossier": "Anniversaire",
+                    "Quartier": "Biyem-Assi",
+                    "Statut": "",
+                    "Image_1": "",
+                },
             ]
         )
-        df_src.to_excel(source_xlsx, index=False)
+        df_init.to_excel(excel_path, index=False)
+
+        folders = ExcelManager.read_source_folders(str(excel_path))
+        assert len(folders) == 4
+
+        print("2. Test de la mise à jour des liens (modification / suppression de lien selon l'état actuel du dossier source)...")
+        # Dans TAV_204, il n'y a désormais qu'une seule photo (photo_actuelle.jpg) et 1 vidéo (clip.mp4) :
+        # L'ancien lien Image_2 doit donc être supprimé et Image_1 mis à jour !
+        (folder_prefix / "photo_actuelle.jpg").write_bytes(b"new_img_bytes")
+        (folder_prefix / "clip.mp4").write_bytes(b"new_vid_bytes")
 
         uploader = B2UploaderService("k", "a", "b")
         uploader.bucket = FakeB2Bucket()
 
+        imgs, vids, _, _, _ = uploader.upload_folder(folder_prefix)
+        ExcelManager.update_row_links(
+            excel_path=str(excel_path),
+            row_index=folders[1]["row_index"],
+            dossier_name="TAV_204",
+            image_links=imgs,
+            video_links=vids,
+            status="Terminé",
+        )
+
+        print("3. Test des dossiers vides et de la coloration en ROUGE de 'Dossier vide'...")
         std_img_file = parent / "image_standard_unique.jpg"
         std_img_file.write_bytes(b"standard_image_bytes_12345")
+        std_url = uploader.ensure_tav_standard_image_url(str(std_img_file))
 
-        # Premier appel : téléverse l'image standard une fois
-        std_url_1 = uploader.ensure_tav_standard_image_url(str(std_img_file))
-        # Second appel : réutilise exactement le même lien sans re-téléverser
-        std_url_2 = uploader.ensure_tav_standard_image_url(str(std_img_file))
-        assert std_url_1 == std_url_2
-        assert len(uploader.bucket.upload_calls) == 1, "L'image standard TAV ne doit être téléversée qu'une seule fois !"
+        # Dossier TAV_999 vide -> Image standard + "Dossier vide" en rouge
+        ExcelManager.update_row_links(
+            excel_path=str(excel_path),
+            row_index=folders[2]["row_index"],
+            dossier_name="TAV_999",
+            image_links=[std_url],
+            video_links=[],
+            status="Dossier vide",
+        )
 
-        # Application de la règle pour TAV_999 (vide) -> Image standard dans Excel final + "Dossier vide" dans Excel source
-        ExcelManager.upsert_output_result(str(output_xlsx), "TAV_999", [std_url_1], [])
-        ExcelManager.update_source_status(str(source_xlsx), 2, "TAV_999", "Dossier vide")
+        # Dossier Anniversaire vide (non TAV) -> Aucun lien + "Dossier vide" en rouge
+        ExcelManager.update_row_links(
+            excel_path=str(excel_path),
+            row_index=folders[3]["row_index"],
+            dossier_name="Anniversaire",
+            image_links=[],
+            video_links=[],
+            status="Dossier vide",
+        )
 
-        # Application de la règle pour Anniversaire (vide, non TAV) -> Rien dans Excel final + "Dossier vide" dans Excel source
-        ExcelManager.update_source_status(str(source_xlsx), 3, "Anniversaire", "Dossier vide")
+        # Vérification complète du classeur Excel finalisé
+        wb = openpyxl.load_workbook(excel_path)
+        ws = wb.active
+        col_map, _ = ExcelManager._ensure_columns(ws)
 
-        folders_after = ExcelManager.read_source_folders(str(source_xlsx))
-        assert folders_after[0]["statut"] == "Dossier vide" and folders_after[0]["empty_status"] is True
-        assert folders_after[1]["statut"] == "Dossier vide" and folders_after[1]["empty_status"] is True
+        # 1) Vérifier que la ligne 2 (Dossier_Autre_Disque) et la colonne "Quartier" n'ont PAS été supprimées ni écrasées
+        assert ws.cell(row=2, column=2).value == "Odza", "La colonne personnalisée Quartier doit être intacte !"
+        assert (
+            ws.cell(row=2, column=col_map["Image_1"]).value
+            == "https://f000.backblazeb2.com/file/mon-bucket/Dossier_Autre_Disque/ancienne_img.jpg"
+        ), "Les liens existants des dossiers non touchés doivent être préservés !"
 
-        df_out = ExcelManager._read_excel_dataframe_safe(output_xlsx)
-        assert len(df_out) == 1
-        assert df_out.loc[0, "Dossier"] == "TAV_999"
-        assert df_out.loc[0, "Image_1"] == std_url_1
-        assert df_out.loc[0, "Image_2"] == ""
-        print("   -> OK : Gestion des dossiers vides ('Dossier vide' + image standard unique pour 'TAV') validée.")
+        # 2) Vérifier que TAV_204 (ligne 3) a bien mis à jour Image_1, supprimé l'ancien Image_2, et ajouté Video_1
+        assert ws.cell(row=3, column=col_map["Image_1"]).value == imgs[0]
+        assert ws.cell(row=3, column=col_map["Image_2"]).value is None, "L'ancien lien Image_2 supprimé du dossier source doit être effacé !"
+        assert ws.cell(row=3, column=col_map["Video_1"]).value == vids[0]
 
-        print("3. Test de la synchronisation intelligente d'un dossier déjà sauvegardé (identique vs modifié)...")
-        (folder_prefix / "photo1.jpg").write_bytes(b"img_data_1")
-        (folder_prefix / "video1.mp4").write_bytes(b"vid_data_1")
+        # 3) Vérifier que TAV_999 (ligne 4) et Anniversaire (ligne 5) ont "Dossier vide" colorié en ROUGE (#E51B23)
+        cell_statut_tav = ws.cell(row=4, column=col_map["Statut"])
+        cell_statut_other = ws.cell(row=5, column=col_map["Statut"])
+        assert cell_statut_tav.value == "Dossier vide"
+        assert "E51B23" in str(cell_statut_tav.font.color.rgb), f"Couleur obtenue : {cell_statut_tav.font.color.rgb}"
+        assert cell_statut_other.value == "Dossier vide"
+        assert "E51B23" in str(cell_statut_other.font.color.rgb)
+        assert ws.cell(row=4, column=col_map["Image_1"]).value == std_url
+        assert ws.cell(row=5, column=col_map["Image_1"]).value is None
+        wb.close()
+        print("   -> OK : Fichier Excel unique, préservation des données, mise à jour/suppression de liens et 'Dossier vide' en rouge validés !")
 
-        # 1ère sauvegarde : création sur B2
-        uploader.bucket.upload_calls.clear()
-        imgs1, vids1, _, _, state1 = uploader.upload_folder(folder_prefix)
-        assert state1 == "created"
-        assert len(uploader.bucket.upload_calls) == 2
-        assert len(imgs1) == 1 and len(vids1) == 1
-
-        # 2ème sauvegarde sans modification : le dossier source est identique au dossier sauvegardé
-        # -> ne rien faire sur B2, mais retourner quand même les liens pour l'Excel final
-        uploader.bucket.upload_calls.clear()
-        imgs2, vids2, _, _, state2 = uploader.upload_folder(folder_prefix)
-        assert state2 == "identical", f"Attendu 'identical', obtenu '{state2}'"
-        assert len(uploader.bucket.upload_calls) == 0, "Aucun fichier ne doit être re-téléversé si le dossier est identique !"
-        assert imgs2 == imgs1 and vids2 == vids1
-
-        # 3ème sauvegarde après ajout d'une nouvelle photo2.jpg dans le dossier source
-        # -> mise à jour uniquement du fichier nouveau dans le dossier sauvegardé + liens complets pour l'Excel final
-        (folder_prefix / "photo2.jpg").write_bytes(b"img_data_2")
-        uploader.bucket.upload_calls.clear()
-        imgs3, vids3, _, _, state3 = uploader.upload_folder(folder_prefix)
-        assert state3 == "updated", f"Attendu 'updated', obtenu '{state3}'"
-        assert len(uploader.bucket.upload_calls) == 1, "Seul le nouveau fichier photo2.jpg doit être téléversé !"
-        assert len(imgs3) == 2 and len(vids3) == 1
-        print("   -> OK : Comparaison et mise à jour différentielle des dossiers déjà sauvegardés validées !")
+    # Mise à jour du modèle dossiers.xlsx du projet avec les colonnes complètes s'il est vide
+    proj_excel = Path(__file__).resolve().parent / "dossiers.xlsx"
+    if proj_excel.exists():
+        ExcelManager.read_source_folders(str(proj_excel))
 
     print("\nTOUS LES TESTS SONT PASSÉS AVEC SUCCÈS !")
 

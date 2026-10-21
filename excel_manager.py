@@ -1,10 +1,13 @@
+import io
+import json
 import os
 import shutil
 import time
+import zipfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 
@@ -21,14 +24,46 @@ class ExcelPermissionError(Exception):
     pass
 
 
+def _fsync_file_Write(path: Path, data_bytes: bytes) -> None:
+    """Écrit des octets sur le disque et force le vidage matériel (fsync) sur le disque dur/SSD."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data_bytes)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _is_valid_xlsx_file(path: Path) -> bool:
+    """Vérifie qu'un fichier .xlsx existe, est une archive ZIP complète non tronquée et s'ouvre dans openpyxl."""
+    if not path.exists():
+        return False
+    try:
+        if path.stat().st_size < 100:
+            return False
+        with zipfile.ZipFile(path, "r") as zf:
+            if zf.testzip() is not None:
+                return False
+        wb = openpyxl.load_workbook(path)
+        wb.close()
+        return True
+    except Exception:
+        return False
+
+
 class ExcelManager:
     """
-    Gère la lecture et la mise à jour du fichier Excel unique (initial).
-    - Ne supprime jamais les colonnes ou informations existantes du fichier Excel.
-    - Ajoute ou met à jour `Statut`, `Image_1`..`Image_10`, `Video_1`..`Video_5` dans les colonnes suivantes.
-    - Colorie "Dossier vide" en rouge (#E51B23).
-    - Protège le fichier contre les coupures brusques de courant (écriture atomique + copie _backup.xlsx).
+    Gère la lecture et la mise à jour du fichier Excel unique avec protection matérielle
+    5 niveaux contre les coupures brusques d'électricité ("coupure de lumière") :
+    1. Génération et validation ZIP en mémoire RAM (`io.BytesIO`) avant tout accès disque.
+    2. Écriture dans un fichier temporaire `.~tmp` avec `flush()` + `os.fsync()` (forçage physique SSD/HDD).
+    3. Double copie de secours synchronisée (`_backup.xlsx` local + copie miroir dans `%APPDATA%`).
+    4. Journal de transaction (`excel_wal.json` avec `fsync`) mémorisant la dernière ligne écrite.
+    5. Auto-réparation transparente à l'ouverture si une coupure de courant est survenue.
     """
+
+    @staticmethod
+    def _is_valid_xlsx_file(path: Path) -> bool:
+        return _is_valid_xlsx_file(path)
 
     @staticmethod
     def _normalize_header(val: Any) -> str:
@@ -38,7 +73,6 @@ class ExcelManager:
 
     @staticmethod
     def is_completed_status(val: Any) -> bool:
-        """Vérifie si la valeur de la cellule Statut correspond à 'Terminé'."""
         if val is None:
             return False
         normalized = str(val).strip().lower()
@@ -46,7 +80,6 @@ class ExcelManager:
 
     @staticmethod
     def is_empty_folder_status(val: Any) -> bool:
-        """Vérifie si la valeur de la cellule Statut correspond à 'Dossier vide'."""
         if val is None:
             return False
         normalized = str(val).strip().lower()
@@ -57,28 +90,123 @@ class ExcelManager:
         return path.with_name(f"{path.stem}_backup{path.suffix}")
 
     @staticmethod
+    def _get_appdata_backup_path(path: Path) -> Path:
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) / "BackblazeB2Uploader" / "excel_backups" if appdata else Path.home() / ".backblaze_b2_uploader" / "excel_backups"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / f"{path.stem}_safe_mirror{path.suffix}"
+
+    @staticmethod
+    def _get_wal_path(path: Path) -> Path:
+        return path.with_name(f".~wal_{path.stem}.json")
+
+    @staticmethod
     def _get_temp_path(path: Path) -> Path:
         return path.with_name(f".~tmp_{path.stem}{path.suffix}")
 
     @classmethod
+    def _record_wal_entry(
+        cls,
+        path: Path,
+        row_index: int,
+        dossier_name: str,
+        image_links: Optional[List[str]],
+        video_links: Optional[List[str]],
+        status: Optional[str],
+    ) -> None:
+        """Enregistre la transaction en cours dans un journal WAL atomique avec fsync avant de toucher au fichier Excel."""
+        wal_path = cls._get_wal_path(path)
+        wal_tmp = wal_path.with_suffix(".json.tmp")
+        payload = {
+            "row_index": row_index,
+            "dossier_name": dossier_name,
+            "image_links": image_links,
+            "video_links": video_links,
+            "status": status,
+            "timestamp": time.time(),
+        }
+        try:
+            raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            _fsync_file_Write(wal_tmp, raw)
+            os.replace(wal_tmp, wal_path)
+        except Exception:
+            pass
+
+    @classmethod
+    def _clear_wal(cls, path: Path) -> None:
+        wal_path = cls._get_wal_path(path)
+        if wal_path.exists():
+            try:
+                wal_path.unlink()
+            except Exception:
+                pass
+
+    @classmethod
     def _load_workbook_safe(cls, path: Path) -> openpyxl.Workbook:
         """
-        Charge un classeur Excel en toute sécurité.
-        Si le fichier principal a été endommagé par une coupure électrique brutale,
-        restaure automatiquement la copie de secours `_backup.xlsx`.
+        Charge le classeur Excel en vérifiant son intégrité ZIP/XML complète.
+        Si une coupure de courant a abîmé le fichier principal, restaure automatiquement
+        la copie de secours intacte (`_backup.xlsx` ou miroir `%APPDATA%`) et rejoue le journal WAL.
         """
         bak_path = cls._get_backup_path(path)
+        appdata_bak = cls._get_appdata_backup_path(path)
+        tmp_path = cls._get_temp_path(path)
+
+        # Si le fichier principal est valide, on l'ouvre directement (et on rejoue un éventuel WAL d'une coupure précédente)
+        if _is_valid_xlsx_file(path):
+            wb = openpyxl.load_workbook(path)
+            if cls._get_wal_path(path).exists():
+                cls._replay_wal_if_present(wb, path)
+            return wb
+
+        # Sinon : le fichier principal a été endommagé par une coupure brusque de courant !
+        # On cherche la copie intacte la plus récente parmi : .~tmp (si complet), _backup.xlsx, ou miroir AppData
+        for candidate in (tmp_path, bak_path, appdata_bak):
+            if _is_valid_xlsx_file(candidate):
+                data = candidate.read_bytes()
+                _fsync_file_Write(path, data)
+                wb = openpyxl.load_workbook(path)
+                cls._replay_wal_if_present(wb, path)
+                return wb
+
+        # Si aucune copie de secours n'existe encore, tente l'ouverture standard pour lever l'erreur appropriée
+        return openpyxl.load_workbook(path)
+
+    @classmethod
+    def _replay_wal_if_present(cls, wb: openpyxl.Workbook, path: Path) -> None:
+        """Rejoue la dernière modification enregistrée dans le journal WAL si une coupure a eu lieu pendant la sauvegarde."""
+        wal_path = cls._get_wal_path(path)
+        if not wal_path.exists():
+            return
         try:
-            return openpyxl.load_workbook(path)
-        except Exception as primary_err:
-            if bak_path.exists():
-                try:
-                    wb = openpyxl.load_workbook(bak_path)
-                    shutil.copy2(bak_path, path)
-                    return wb
-                except Exception:
-                    pass
-            raise primary_err
+            wal_data = json.loads(wal_path.read_text(encoding="utf-8"))
+            ws = wb.active
+            col_map, _ = cls._ensure_columns(ws)
+            row_idx = int(wal_data.get("row_index", 2))
+            dossier_name = str(wal_data.get("dossier_name", ""))
+            target_row = cls._find_target_row(ws, col_map["Dossier"], row_idx, dossier_name)
+
+            img_links = wal_data.get("image_links")
+            if isinstance(img_links, list):
+                for i in range(1, 11):
+                    val = img_links[i - 1] if (i - 1) < len(img_links) else ""
+                    ws.cell(row=target_row, column=col_map[f"Image_{i}"], value=val if val else None)
+
+            vid_links = wal_data.get("video_links")
+            if isinstance(vid_links, list):
+                for i in range(1, 6):
+                    val = vid_links[i - 1] if (i - 1) < len(vid_links) else ""
+                    ws.cell(row=target_row, column=col_map[f"Video_{i}"], value=val if val else None)
+
+            status = wal_data.get("status")
+            if status:
+                sc = ws.cell(row=target_row, column=col_map["Statut"], value=str(status))
+                cls._apply_status_style(sc, str(status))
+
+            cls._save_workbook_atomic(wb, path)
+            cls._clear_wal(path)
+        except Exception:
+            pass
 
     @classmethod
     def _ensure_columns(cls, ws: openpyxl.worksheet.worksheet.Worksheet) -> Tuple[Dict[str, int], bool]:
@@ -86,12 +214,10 @@ class ExcelManager:
         Repère les colonnes existantes ('Dossier', 'Statut', 'Image_1'..'Image_10', 'Video_1'..'Video_5')
         sans jamais supprimer ni écraser les autres colonnes du fichier Excel.
         Crée dans les colonnes suivantes celles qui manquent encore.
-        Retourne (mapping_colonnes, a_ete_modifie).
         """
         col_map: Dict[str, int] = {}
         max_col = max(ws.max_column or 1, 1)
 
-        # Recherche des colonnes déjà présentes sur la ligne 1
         for col_idx in range(1, max_col + 1):
             raw_val = ws.cell(row=1, column=col_idx).value
             norm = cls._normalize_header(raw_val)
@@ -111,7 +237,6 @@ class ExcelManager:
                 "La colonne 'Dossier' est introuvable dans la première ligne du fichier Excel."
             )
 
-        # Déterminer la dernière colonne réellement utilisée sur la ligne 1
         last_used_col = 0
         for col_idx in range(1, max_col + 1):
             if ws.cell(row=1, column=col_idx).value is not None:
@@ -121,7 +246,6 @@ class ExcelManager:
         header_fill = PatternFill(start_color="102A5E", end_color="102A5E", fill_type="solid")
         header_font = Font(color="FFFFFF", bold=True, size=11)
 
-        # Ajout des colonnes manquantes à la suite (Statut, puis Image_1..10, puis Video_1..5)
         for col_name in ["Statut"] + MEDIA_COLUMNS:
             if col_name not in col_map:
                 last_used_col += 1
@@ -140,7 +264,7 @@ class ExcelManager:
     def _apply_status_style(cls, cell: openpyxl.cell.cell.Cell, status: str) -> None:
         """
         Applique le style visuel au statut :
-        - 'Dossier vide' : colorié en ROUGE (texte rouge vif gras + fond rouge clair)
+        - 'Dossier vide' : colorié en ROUGE (texte rouge vif #E51B23 gras + fond rouge clair #FADBD8)
         - 'Terminé' : texte vert gras
         - 'En cours' : texte bleu gras
         """
@@ -162,14 +286,10 @@ class ExcelManager:
 
     @classmethod
     def read_source_folders(cls, source_path: str) -> List[Dict[str, Any]]:
-        """
-        Lit le fichier Excel initial.
-        S'assure que les colonnes 'Statut', 'Image_1'..'Image_10' et 'Video_1'..'Video_5' existent
-        dans les colonnes suivantes sans supprimer aucune information déjà présente.
-        """
         path = Path(source_path)
         bak_path = cls._get_backup_path(path)
-        if not path.exists() and not bak_path.exists():
+        appdata_bak = cls._get_appdata_backup_path(path)
+        if not path.exists() and not bak_path.exists() and not appdata_bak.exists():
             raise FileNotFoundError(f"Le fichier Excel est introuvable : {source_path}")
 
         wb = cls._load_workbook_safe(path)
@@ -190,7 +310,6 @@ class ExcelManager:
             completed = cls.is_completed_status(statut_str)
             empty_status = cls.is_empty_folder_status(statut_str)
 
-            # Lecture des liens existants éventuels sur cette ligne
             existing_images: List[str] = []
             for i in range(1, 11):
                 v = ws.cell(row=row_idx, column=col_map[f"Image_{i}"]).value
@@ -213,8 +332,8 @@ class ExcelManager:
                 }
             )
 
-        if need_save:
-            cls._save_workbook_atomic(wb, path)
+        # Dès la première lecture, on crée/met à jour les copies de secours matérielles
+        cls._save_workbook_atomic(wb, path)
         wb.close()
         return folders
 
@@ -243,13 +362,9 @@ class ExcelManager:
         dossier_name: str,
         status: str = "Terminé",
     ) -> None:
-        """
-        Met à jour immédiatement et atomiquement la colonne 'Statut'
-        pour la ligne correspondante dans le fichier Excel.
-        Si status == 'Dossier vide', colorie la cellule en rouge.
-        """
         path = Path(source_path)
         wb = cls._load_workbook_safe(path)
+        cls._record_wal_entry(path, row_index, dossier_name, None, None, status)
         ws = wb.active
 
         col_map, _ = cls._ensure_columns(ws)
@@ -260,6 +375,7 @@ class ExcelManager:
 
         cls._save_workbook_atomic(wb, path)
         wb.close()
+        cls._clear_wal(path)
 
     @classmethod
     def update_row_links(
@@ -271,15 +387,9 @@ class ExcelManager:
         video_links: List[str],
         status: Optional[str] = None,
     ) -> None:
-        """
-        Met à jour uniquement les colonnes `Image_1`..`Image_10` et `Video_1`..`Video_5`
-        (ainsi que `Statut` si fourni) sur la ligne du dossier dans le fichier Excel initial,
-        sans jamais supprimer les autres lignes ou colonnes existantes du fichier.
-        - Si un fichier photo/vidéo a été ajouté ou modifié, son lien est ajouté/mis à jour.
-        - Si un fichier photo/vidéo a été supprimé du dossier source, l'ancien lien en trop est effacé.
-        """
         path = Path(excel_path)
         wb = cls._load_workbook_safe(path)
+        cls._record_wal_entry(path, row_index, dossier_name, image_links, video_links, status)
         ws = wb.active
 
         col_map, _ = cls._ensure_columns(ws)
@@ -305,13 +415,10 @@ class ExcelManager:
 
         cls._save_workbook_atomic(wb, path)
         wb.close()
+        cls._clear_wal(path)
 
     @classmethod
     def create_source_from_directory(cls, excel_path: str, parent_dir: Optional[str] = None) -> int:
-        """
-        Crée ou initialise un fichier Excel `dossiers.xlsx` avec toutes les colonnes :
-        Dossier | Statut | Image_1 ... Image_10 | Video_1 ... Video_5
-        """
         path = Path(excel_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -365,25 +472,52 @@ class ExcelManager:
         retries: int = 6,
         delay: float = 0.8,
     ) -> None:
+        """
+        Sauvegarde matérielle anti-coupure d'électricité ("coupure de lumière") :
+        1. Sérialise d'abord le classeur en mémoire RAM (`io.BytesIO`) et vérifie que l'archive ZIP est 100% valide.
+        2. Si l'ancien fichier sur disque est valide, met à jour les copies de secours (`_backup.xlsx` et miroir `%APPDATA%`) avec `fsync`.
+        3. Écrit les octets validés dans `.~tmp` avec `flush()` + `os.fsync()` (forçage physique sur le disque).
+        4. Remplace atomiquement le fichier cible via `os.replace(tmp_path, path)`.
+        5. Met à jour la copie `_backup.xlsx` avec `fsync`.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = cls._get_temp_path(path)
         bak_path = cls._get_backup_path(path)
+        appdata_bak = cls._get_appdata_backup_path(path)
+
+        # 1. Génération et contrôle d'intégrité ZIP en mémoire vive
+        mem_buffer = io.BytesIO()
+        wb.save(mem_buffer)
+        xlsx_bytes = mem_buffer.getvalue()
+
+        with zipfile.ZipFile(io.BytesIO(xlsx_bytes), "r") as zf:
+            if zf.testzip() is not None:
+                raise IOError("Le classeur Excel généré en mémoire est invalide.")
 
         last_err: Optional[Exception] = None
         for attempt in range(1, retries + 1):
             try:
-                wb.save(tmp_path)
+                # 2. Écriture physique forcée (fsync) dans le fichier temporaire
+                _fsync_file_Write(tmp_path, xlsx_bytes)
 
-                if path.exists() and path.stat().st_size > 0:
+                # 3. Sauvegarde préalable de l'ancien fichier valide (si existant)
+                if _is_valid_xlsx_file(path):
                     try:
-                        shutil.copy2(path, bak_path)
+                        old_bytes = path.read_bytes()
+                        _fsync_file_Write(bak_path, old_bytes)
                     except Exception:
                         pass
 
+                # 4. Remplacement atomique NTFS
                 os.replace(tmp_path, path)
 
+                # 5. Mise à jour immédiate des 2 copies de secours (locale + AppData) avec fsync
                 try:
-                    shutil.copy2(path, bak_path)
+                    _fsync_file_Write(bak_path, xlsx_bytes)
+                except Exception:
+                    pass
+                try:
+                    _fsync_file_Write(appdata_bak, xlsx_bytes)
                 except Exception:
                     pass
                 return

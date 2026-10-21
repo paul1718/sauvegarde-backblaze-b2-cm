@@ -9,5 +9,6 @@ state_journal.json
 *.tmp
 *_backup.xlsx
 .~tmp_*
+.~wal_*
 !$*.xlsx
 ~$*.xlsx

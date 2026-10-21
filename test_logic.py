@@ -173,6 +173,37 @@ def run_tests() -> None:
         wb.close()
         print("   -> OK : Fichier Excel unique, préservation des données, mise à jour/suppression de liens et 'Dossier vide' en rouge validés !")
 
+        print("4. Test de simulation de coupure de courant brutale (fichier Excel tronqué + journal WAL en attente)...")
+        # Simuler une écriture interrompue par une coupure électrique :
+        # 1) On écrit une transaction dans le journal WAL
+        ExcelManager._record_wal_entry(
+            path=excel_path,
+            row_index=folders[3]["row_index"],
+            dossier_name="Anniversaire",
+            image_links=["https://f000.backblazeb2.com/file/mon-bucket/Anniversaire/photo_secours.jpg"],
+            video_links=[],
+            status="Terminé",
+        )
+        # 2) On détruit/tronque le fichier Excel principal comme si le courant avait coupé en plein milieu d'un accès disque
+        excel_path.write_bytes(b"\x00\x00COURANT_COUPE_BRUTALEMENT_FICHIER_TRONQUE")
+        assert not ExcelManager._is_valid_xlsx_file(excel_path), "Le fichier tronqué doit être détecté comme invalide !"
+
+        # 3) À la réouverture (ou à l'opération suivante), ExcelManager doit auto-réparer le fichier depuis le backup/miroir ET rejouer le WAL !
+        recovered_folders = ExcelManager.read_source_folders(str(excel_path))
+        assert ExcelManager._is_valid_xlsx_file(excel_path), "Le fichier Excel principal doit être intégralement restauré !"
+        assert not ExcelManager._get_wal_path(excel_path).exists(), "Le journal WAL doit avoir été rejoué et nettoyé !"
+
+        wb_rec = openpyxl.load_workbook(excel_path)
+        ws_rec = wb_rec.active
+        col_map_rec, _ = ExcelManager._ensure_columns(ws_rec)
+        assert ws_rec.cell(row=5, column=col_map_rec["Statut"]).value == "Terminé"
+        assert (
+            ws_rec.cell(row=5, column=col_map_rec["Image_1"]).value
+            == "https://f000.backblazeb2.com/file/mon-bucket/Anniversaire/photo_secours.jpg"
+        )
+        wb_rec.close()
+        print("   -> OK : Auto-réparation après coupure de courant + rejeu automatique du journal WAL validés à 100% !")
+
     # Mise à jour du modèle dossiers.xlsx du projet avec les colonnes complètes s'il est vide
     proj_excel = Path(__file__).resolve().parent / "dossiers.xlsx"
     if proj_excel.exists():

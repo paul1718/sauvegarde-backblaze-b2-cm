@@ -1,7 +1,7 @@
 {
-    "version": "1.5.0",
+    "version": "1.5.1",
     "published_at": "2026-10-21",
-    "description": "Suppression du second fichier Excel : mise à jour directe des liens Images/Vidéos et des statuts dans le fichier Excel initial (sans perte des données existantes) et coloration en rouge de 'Dossier vide'.",
+    "description": "Protection matérielle anti-coupure de courant (fsync disque, sérialisation RAM validée, double sauvegarde miroir et journal de transaction WAL auto-réparateur).",
     "files": [
         "version.json",
         "app.py",

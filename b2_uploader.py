@@ -46,10 +46,56 @@ def normalize_b2_url(raw_url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, encoded_path, parts.query, parts.fragment))
 
 
+def is_tav_folder(excel_dossier_name: str, folder_path: Optional[Path] = None) -> bool:
+    """
+    Vérifie si le nom du dossier commence par 'TAV' (insensible à la casse).
+    """
+    if excel_dossier_name.strip().upper().startswith("TAV"):
+        return True
+    if folder_path is not None and folder_path.name.strip().upper().startswith("TAV"):
+        return True
+    return False
+
+
+def resolve_matching_folder(parent_dir: Path, excel_dossier_name: str) -> Optional[Path]:
+    """
+    Recherche dans `parent_dir` le dossier correspondant à `excel_dossier_name` :
+    1. Correspondance exacte (`parent_dir / excel_dossier_name`)
+    2. Sinon, tout dossier dont le nom COMMENCE par `excel_dossier_name` (insensible à la casse)
+       et se termine par autre chose.
+    """
+    clean_name = excel_dossier_name.strip()
+    if not clean_name or not parent_dir.exists() or not parent_dir.is_dir():
+        return None
+
+    # 1. Correspondance exacte directe
+    exact_path = parent_dir / clean_name
+    if exact_path.exists() and exact_path.is_dir():
+        return exact_path
+
+    # 2. Recherche insensible à la casse (exacte d'abord, puis par préfixe)
+    prefix_lower = clean_name.lower()
+    try:
+        subdirs = [d for d in parent_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
+    except Exception:
+        return None
+
+    subdirs.sort(key=natural_sort_key)
+
+    for d in subdirs:
+        if d.name.strip().lower() == prefix_lower:
+            return d
+
+    for d in subdirs:
+        if d.name.strip().lower().startswith(prefix_lower):
+            return d
+
+    return None
+
+
 def is_internet_connected(timeout: float = 3.0) -> bool:
     """
-    Vérifie si la connexion Internet est active en testant plusieurs cibles fiables
-    (API Backblaze B2, Cloudflare DNS 1.1.1.1, Google DNS 8.8.8.8).
+    Vérifie si la connexion Internet est active en testant plusieurs cibles fiables.
     """
     targets = [
         ("api.backblazeb2.com", 443),
@@ -72,9 +118,9 @@ class UploadCancelledError(Exception):
 
 class B2UploaderService:
     """
-    Service gérant la connexion à Backblaze B2, le parcours récursif des dossiers,
-    la mise en pause automatique en cas de coupure Internet avec reprise dès le retour du réseau,
-    et la sauvegarde au fil de l'eau.
+    Service gérant la connexion à Backblaze B2, la résolution des dossiers par préfixe,
+    la gestion de l'image standard pour les dossiers 'TAV' vides, la comparaison/mise à jour
+    intelligente des dossiers déjà sauvegardés, et la pause/reprise automatique sur coupure Internet.
     """
 
     def __init__(
@@ -110,7 +156,6 @@ class B2UploaderService:
             self.status_callback(text)
 
     def _check_pause_and_stop(self) -> None:
-        """Vérifie si l'utilisateur a mis en pause ou arrêté le processus."""
         if self.stop_event.is_set():
             raise UploadCancelledError("Sauvegarde interrompue par l'utilisateur.")
         if not self.pause_event.is_set():
@@ -124,8 +169,7 @@ class B2UploaderService:
     def _wait_for_internet_if_down(self, context_msg: str = "") -> bool:
         """
         Si la connexion Internet est coupée, met automatiquement la sauvegarde en pause
-        et attend patiemment que la connexion revienne (même si la coupure dure plusieurs heures).
-        Retourne True si une attente réseau a eu lieu.
+        et attend que la connexion revienne.
         """
         self._check_pause_and_stop()
         if is_internet_connected():
@@ -154,15 +198,10 @@ class B2UploaderService:
         return True
 
     def connect(self, max_auth_retries: int = 5) -> None:
-        """
-        Authentifie le compte Backblaze B2 et récupère le Bucket.
-        Attend indéfiniment si Internet est coupé, mais échoue rapidement si les identifiants B2 sont invalides.
-        """
         last_error: Optional[Exception] = None
         attempt = 0
         while attempt < max_auth_retries:
             self._check_pause_and_stop()
-            # Si Internet est coupé, on attend son retour sans consommer les tentatives d'authentification
             self._wait_for_internet_if_down("Connexion B2")
 
             attempt += 1
@@ -176,9 +215,8 @@ class B2UploaderService:
                 raise
             except Exception as e:
                 last_error = e
-                # Si la coupure Internet vient juste de se produire pendant l'appel
                 if not is_internet_connected():
-                    attempt -= 1  # Ne pas pénaliser une coupure Internet
+                    attempt -= 1
                     continue
                 if attempt < max_auth_retries:
                     wait_sec = min(2 ** attempt, 20)
@@ -190,7 +228,6 @@ class B2UploaderService:
         raise ConnectionError(f"Impossible de se connecter à Backblaze B2 : {last_error}")
 
     def _sleep_interruptible(self, seconds: float) -> None:
-        """Attend `seconds` secondes tout en restant réactif à l'arrêt immédiat."""
         end_time = time.time() + seconds
         while time.time() < end_time:
             if self.stop_event.is_set():
@@ -225,47 +262,81 @@ class B2UploaderService:
 
         return eligible_files
 
-    def _fetch_existing_b2_files(self, folder_name: str) -> Dict[str, int]:
+    def _fetch_existing_b2_files_detailed(self, folder_name: str) -> Dict[str, Dict[str, Any]]:
         """
-        Récupère la liste des fichiers déjà présents sur B2 dans `folder_name/`
-        avec leur taille en octets pour accélérer les reprises après interruption ou coupure de courant.
+        Récupère la liste détaillée des fichiers déjà présents sur B2 dans `folder_name/` :
+        { b2_key: {"size": int, "file_id": str} }
         """
-        existing: Dict[str, int] = {}
+        existing: Dict[str, Dict[str, Any]] = {}
         if not self.bucket:
             return existing
         try:
             prefix = f"{folder_name}/"
             for file_version, _ in self.bucket.ls(folder_to_list=prefix, recursive=True):
-                existing[file_version.file_name] = int(file_version.size)
+                existing[file_version.file_name] = {
+                    "size": int(file_version.size),
+                    "file_id": str(file_version.id_),
+                }
         except Exception:
             pass
         return existing
+
+    def ensure_tav_standard_image_url(self, image_path_or_url: str) -> str:
+        """
+        Garantit l'obtention d'un lien public unique et permanent pour l'image standard
+        destinée aux dossiers vides commençant par 'TAV' :
+        - Si `image_path_or_url` est déjà une URL HTTP(S), la retourne directement.
+        - Si c'est un fichier image local, vérifie s'il est déjà dans `_Image_Standard_TAV/` sur B2
+          (même taille) ; sinon le téléverse une seule fois pour toutes et retourne son URL publique.
+        """
+        val = image_path_or_url.strip()
+        if not val:
+            raise ValueError(
+                "Aucune image standard TAV n'est configurée. Veuillez sélectionner l'image standard pour les dossiers TAV vides."
+            )
+
+        if val.lower().startswith(("http://", "https://")):
+            return val
+
+        local_img = Path(val)
+        if not local_img.exists() or not local_img.is_file():
+            raise FileNotFoundError(f"Le fichier d'image standard TAV est introuvable : {val}")
+
+        b2_key = f"_Image_Standard_TAV/{local_img.name}"
+        existing_std = self._fetch_existing_b2_files_detailed("_Image_Standard_TAV")
+        local_size = local_img.stat().st_size
+
+        if b2_key in existing_std and existing_std[b2_key]["size"] == local_size:
+            raw_url = self.bucket.get_download_url(b2_key)
+            return normalize_b2_url(raw_url)
+
+        self._log(f"Téléversement initial de l'image standard TAV ('{local_img.name}') sur Backblaze B2...", "INFO")
+        url, _ = self._upload_single_file_resilient(
+            local_path=local_img,
+            b2_key=b2_key,
+            existing_b2_files={},
+            local_journal_files={},
+        )
+        self._log(f"✔ Image standard TAV enregistrée sur B2 : {url}", "SUCCESS")
+        return url
 
     def _upload_single_file_resilient(
         self,
         local_path: Path,
         b2_key: str,
-        existing_b2_files: Dict[str, int],
+        existing_b2_files: Dict[str, Dict[str, Any]],
         local_journal_files: Dict[str, Any],
         max_consecutive_server_errors: int = 12,
     ) -> Tuple[str, bool]:
         """
-        Téléverse un fichier sur Backblaze B2 avec résilience totale aux coupures Internet :
-        - Si le fichier est déjà dans le journal local ou sur B2 avec la même taille, récupère son lien sans re-téléverser.
-        - Si Internet coupe en plein transfert, se met en pause automatique et reprend dès que la connexion revient.
-        Retourne (url_publique, etait_deja_present).
+        Téléverse un fichier sur Backblaze B2 avec résilience totale aux coupures Internet.
+        Retourne (url_publique, etait_deja_present_et_identique).
         """
         self._check_pause_and_stop()
         local_size = local_path.stat().st_size
 
-        # 1. Vérification dans le journal local anti-coupure de courant
-        if b2_key in local_journal_files:
-            entry = local_journal_files[b2_key]
-            if isinstance(entry, dict) and entry.get("size") == local_size and entry.get("url"):
-                return str(entry["url"]), True
-
-        # 2. Vérification sur le bucket Backblaze B2
-        if b2_key in existing_b2_files and existing_b2_files[b2_key] == local_size:
+        # Vérification directe sur le bucket Backblaze B2 (taille identique)
+        if b2_key in existing_b2_files and existing_b2_files[b2_key]["size"] == local_size:
             raw_url = self.bucket.get_download_url(b2_key)
             return normalize_b2_url(raw_url), True
 
@@ -274,7 +345,6 @@ class B2UploaderService:
 
         while consecutive_errors < max_consecutive_server_errors:
             self._check_pause_and_stop()
-            # Si Internet est coupé, attend son retour indéfiniment
             if self._wait_for_internet_if_down(local_path.name):
                 try:
                     self.connect(max_auth_retries=5)
@@ -298,7 +368,6 @@ class B2UploaderService:
                 raise
             except (B2Error, OSError, Exception) as e:
                 last_err = e
-                # Si la coupure Internet est la cause de l'erreur, on passe en pause réseau sans incrémenter le compteur d'échec fatal
                 if not is_internet_connected():
                     self._wait_for_internet_if_down(local_path.name)
                     try:
@@ -335,19 +404,65 @@ class B2UploaderService:
         local_journal_files: Optional[Dict[str, Any]] = None,
         on_file_uploaded: Optional[Callable[[int, Path, str, str], None]] = None,
         on_root_links_updated: Optional[Callable[[List[str], List[str], int, int], None]] = None,
-    ) -> Tuple[List[str], List[str], int, int]:
+    ) -> Tuple[List[str], List[str], int, int, str]:
         """
-        Téléverse l'intégralité d'un dossier (et tous ses sous-dossiers) vers Backblaze B2.
-        Appelle `on_root_links_updated` au fil de l'eau dès qu'un média racine est téléversé
-        afin d'enregistrer immédiatement le fichier Excel de sortie.
+        Compare le dossier source local `folder_path` avec le dossier sauvegardé sur B2 :
+        - Si le dossier est déjà sauvegardé et 100% identique sur B2 : ne fait aucun téléversement,
+          mais génère et retourne les liens des images et vidéos racine pour l'Excel final (`sync_state = "identical"`).
+        - Si le dossier a changé (nouveaux fichiers, fichiers modifiés ou fichiers supprimés localement) :
+          met à jour le dossier sauvegardé sur B2 et retourne les liens pour l'Excel final (`sync_state = "updated"`).
+        - Si c'est un nouveau dossier sur B2 : téléverse tout et retourne les liens (`sync_state = "created"`).
         """
         self._check_pause_and_stop()
         if not folder_path.exists() or not folder_path.is_dir():
             raise FileNotFoundError(f"Le dossier est introuvable : {folder_path}")
 
         eligible_files = self.scan_folder_files(folder_path)
-        existing_b2 = self._fetch_existing_b2_files(folder_path.name)
+        existing_b2 = self._fetch_existing_b2_files_detailed(folder_path.name)
         journal_map = local_journal_files if isinstance(local_journal_files, dict) else {}
+
+        was_already_on_b2 = len(existing_b2) > 0
+        local_keys_sizes: Dict[str, int] = {
+            b2_key: local_path.stat().st_size for local_path, b2_key, _ in eligible_files
+        }
+
+        # Détection des différences entre le dossier source local et le dossier sauvegardé sur B2
+        changed_or_new_keys = [
+            k for k, sz in local_keys_sizes.items()
+            if k not in existing_b2 or existing_b2[k]["size"] != sz
+        ]
+        obsolete_b2_keys = [
+            k for k in existing_b2.keys()
+            if k not in local_keys_sizes
+        ]
+
+        is_identical_to_saved = was_already_on_b2 and len(changed_or_new_keys) == 0 and len(obsolete_b2_keys) == 0
+
+        if is_identical_to_saved:
+            self._log(
+                f"  ✓ Dossier '{folder_path.name}' déjà sauvegardé et 100% identique sur B2 : aucun téléversement nécessaire.",
+                "INFO",
+            )
+            sync_state = "identical"
+        elif was_already_on_b2:
+            self._log(
+                f"  🔄 Dossier '{folder_path.name}' modifié depuis la dernière sauvegarde "
+                f"({len(changed_or_new_keys)} fichier(s) à ajouter/mettre à jour, {len(obsolete_b2_keys)} fichier(s) obsolète(s)) : "
+                "mise à jour du dossier sur B2...",
+                "INFO",
+            )
+            sync_state = "updated"
+            # Suppression des fichiers obsolètes sur B2 pour que le dossier sauvegardé reflète exactement la source
+            for obs_key in obsolete_b2_keys:
+                self._check_pause_and_stop()
+                try:
+                    file_id = existing_b2[obs_key]["file_id"]
+                    self.bucket.delete_file_version(file_id, obs_key)
+                    self._log(f"  🗑 Fichier supprimé du dossier B2 (absent de la source) : {obs_key}", "INFO")
+                except Exception:
+                    pass
+        else:
+            sync_state = "created"
 
         root_image_links: List[str] = []
         root_video_links: List[str] = []
@@ -367,16 +482,17 @@ class B2UploaderService:
             )
             total_bytes += file_size
 
-            if already_present:
-                self._log(
-                    f"  ✓ [{idx}/{total_files}] Déjà sauvegardé : {b2_key} ({format_size(file_size)})",
-                    "INFO",
-                )
-            else:
-                self._log(
-                    f"  ↑ [{idx}/{total_files}] Téléversé : {b2_key} ({format_size(file_size)})",
-                    "SUCCESS",
-                )
+            if not is_identical_to_saved:
+                if already_present:
+                    self._log(
+                        f"  ✓ [{idx}/{total_files}] Déjà à jour sur B2 : {b2_key} ({format_size(file_size)})",
+                        "INFO",
+                    )
+                else:
+                    self._log(
+                        f"  ↑ [{idx}/{total_files}] Téléversé / Mis à jour : {b2_key} ({format_size(file_size)})",
+                        "SUCCESS",
+                    )
 
             root_updated = False
             if is_root:
@@ -390,8 +506,7 @@ class B2UploaderService:
             if on_file_uploaded:
                 on_file_uploaded(file_size, local_path, b2_key, url)
 
-            # Enregistrement progressif de l'Excel final au fur et à mesure des téléversements
             if (root_updated or idx == total_files) and on_root_links_updated:
                 on_root_links_updated(root_image_links, root_video_links, idx, total_files)
 
-        return root_image_links, root_video_links, total_files, total_bytes
+        return root_image_links, root_video_links, total_files, total_bytes, sync_state

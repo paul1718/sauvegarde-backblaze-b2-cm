@@ -43,6 +43,14 @@ class ExcelManager:
         return normalized in ("terminé", "termine", "terminée", "terminee")
 
     @staticmethod
+    def is_empty_folder_status(val: Any) -> bool:
+        """Vérifie si la valeur de la cellule Statut correspond à 'Dossier vide'."""
+        if val is None or pd.isna(val):
+            return False
+        normalized = str(val).strip().lower()
+        return normalized == "dossier vide"
+
+    @staticmethod
     def _get_backup_path(path: Path) -> Path:
         return path.with_name(f"{path.stem}_backup{path.suffix}")
 
@@ -100,7 +108,7 @@ class ExcelManager:
         Lit le fichier Excel source (dossiers.xlsx).
         Assure la présence des colonnes 'Dossier' et 'Statut'.
         Retourne une liste de dictionnaires :
-        [{'row_index': int, 'dossier': str, 'statut': str, 'completed': bool}, ...]
+        [{'row_index': int, 'dossier': str, 'statut': str, 'completed': bool, 'empty_status': bool}, ...]
         """
         path = Path(source_path)
         bak_path = cls._get_backup_path(path)
@@ -143,6 +151,7 @@ class ExcelManager:
             raw_statut = ws.cell(row=row_idx, column=statut_col).value
             statut_str = "" if raw_statut is None else str(raw_statut).strip()
             completed = cls.is_completed_status(statut_str)
+            empty_status = cls.is_empty_folder_status(statut_str)
 
             folders.append(
                 {
@@ -150,6 +159,7 @@ class ExcelManager:
                     "dossier": dossier_name,
                     "statut": statut_str,
                     "completed": completed,
+                    "empty_status": empty_status,
                 }
             )
 
@@ -168,7 +178,7 @@ class ExcelManager:
     ) -> None:
         """
         Met à jour immédiatement et atomiquement la colonne 'Statut'
-        pour la ligne correspondante dans le fichier source.
+        pour la ligne correspondante dans le fichier source (`Terminé`, `Dossier vide`, `En cours`, etc.).
         """
         path = Path(source_path)
         wb = cls._load_workbook_safe(path)
@@ -202,6 +212,8 @@ class ExcelManager:
         status_cell = ws.cell(row=target_row, column=statut_col, value=status)
         if cls.is_completed_status(status):
             status_cell.font = Font(color="16A34A", bold=True)
+        elif cls.is_empty_folder_status(status):
+            status_cell.font = Font(color="D97706", bold=True)
         elif status.lower().startswith("en cours"):
             status_cell.font = Font(color="0878F9", bold=True)
         elif status.lower().startswith("erreur"):
@@ -289,10 +301,6 @@ class ExcelManager:
 
     @classmethod
     def create_source_from_directory(cls, excel_path: str, parent_dir: Optional[str] = None) -> int:
-        """
-        Crée ou initialise un fichier Excel source `dossiers.xlsx`.
-        Si `parent_dir` est fourni et valide, liste automatiquement les sous-dossiers directs.
-        """
         path = Path(excel_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -345,13 +353,6 @@ class ExcelManager:
         retries: int = 6,
         delay: float = 0.8,
     ) -> None:
-        """
-        Sauvegarde un classeur Excel de manière 100% atomique (anti-coupure de courant) :
-        1. Écrit dans un fichier temporaire `.~tmp_<nom>.xlsx`
-        2. Vérifie que le fichier temporaire est bien lisible (ZIP intègre)
-        3. Copie l'ancien fichier vers `<nom>_backup.xlsx`
-        4. Remplace atomiquement le fichier cible avec `os.replace(tmp_path, path)`
-        """
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = cls._get_temp_path(path)
         bak_path = cls._get_backup_path(path)
@@ -359,20 +360,16 @@ class ExcelManager:
         last_err: Optional[Exception] = None
         for attempt in range(1, retries + 1):
             try:
-                # 1. Écriture complète dans le fichier temporaire
                 wb.save(tmp_path)
 
-                # 2. Copie de sécurité de l'ancien fichier valide
                 if path.exists() and path.stat().st_size > 0:
                     try:
                         shutil.copy2(path, bak_path)
                     except Exception:
                         pass
 
-                # 3. Remplacement atomique NTFS
                 os.replace(tmp_path, path)
 
-                # 4. Mise à jour de la copie de secours avec la dernière version validée
                 try:
                     shutil.copy2(path, bak_path)
                 except Exception:

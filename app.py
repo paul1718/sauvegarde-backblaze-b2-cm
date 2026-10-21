@@ -38,34 +38,35 @@ from b2_uploader import (
     B2UploaderService,
     UploadCancelledError,
     format_size,
+    resolve_matching_folder,
+    is_tav_folder,
 )
 from auto_updater import AutoUpdater
 
 
 # =============================================================================
 # CHARTE GRAPHIQUE OFFICIELLE — SAUVEGARDE AUTOMATISÉE BACKBLAZE B2 (v1.0)
-# Variables de référence (:root CSS du guide d'identité visuelle)
 # =============================================================================
-COLOR_NAVY = "#102A5E"             # Bleu profond : Titres, texte de marque, navigation latérale
-COLOR_NAVY_LIGHT = "#193B7A"       # Survol dans la barre latérale
-COLOR_PRIMARY = "#0878F9"          # Bleu principal : Boutons principaux, liens, actions
-COLOR_PRIMARY_HOVER = "#0662CE"    # Survol bouton primaire
-COLOR_CYAN = "#12B7F5"             # Cyan : Dégradés, accents, états actifs
-COLOR_ACCENT_RED = "#E51B23"       # Rouge accent : Accent Backblaze B2, bouton d'alerte/danger
-COLOR_ACCENT_RED_HOVER = "#C4141B" # Survol bouton danger
-COLOR_BACKGROUND = "#FFFFFF"       # Blanc : Fond principal des cartes et espaces respirants
-COLOR_SURFACE = "#F2F6FC"          # Fond clair : Arrière-plans de panneaux et zone centrale
-COLOR_TEXT_SECONDARY = "#526078"   # Texte secondaire : Descriptions, métadonnées
-COLOR_CARD_BORDER = "#DCE6F5"      # Bordure légère des cartes
-COLOR_INPUT_BORDER = "#CBD5E1"     # Bordure des champs de formulaire
-COLOR_SUCCESS = "#16A34A"          # Succès
+COLOR_NAVY = "#102A5E"
+COLOR_NAVY_LIGHT = "#193B7A"
+COLOR_PRIMARY = "#0878F9"
+COLOR_PRIMARY_HOVER = "#0662CE"
+COLOR_CYAN = "#12B7F5"
+COLOR_ACCENT_RED = "#E51B23"
+COLOR_ACCENT_RED_HOVER = "#C4141B"
+COLOR_BACKGROUND = "#FFFFFF"
+COLOR_SURFACE = "#F2F6FC"
+COLOR_TEXT_SECONDARY = "#526078"
+COLOR_CARD_BORDER = "#DCE6F5"
+COLOR_INPUT_BORDER = "#CBD5E1"
+COLOR_SUCCESS = "#16A34A"
 COLOR_SUCCESS_BG = "#DCFCE7"
-COLOR_WARNING = "#D97706"          # En cours / Avertissement
+COLOR_WARNING = "#D97706"
 COLOR_WARNING_BG = "#FEF3C7"
 COLOR_DANGER_BG = "#FEE2E2"
 
-RADIUS_CARD = 10                   # --radius-card: 10px
-FONT_FAMILY = "Segoe UI"           # Sans-serif nette compatible Windows (équivalent Inter / Poppins)
+RADIUS_CARD = 10
+FONT_FAMILY = "Segoe UI"
 
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
@@ -94,7 +95,10 @@ def find_asset_path(filename: str) -> Optional[Path]:
 class BackblazeUploaderApp(ctk.CTk):
     """
     Application Desktop de Sauvegarde Automatisée vers Backblaze B2.
-    Implémente intégralement la Charte Graphique et le Pack d'Identité Visuelle v1.0.
+    Implémente intégralement la Charte Graphique v1.0 et les règles métier avancées :
+    - Correspondance des dossiers par préfixe
+    - Gestion des dossiers vides ('Dossier vide' + image standard unique pour 'TAV')
+    - Vérification et mise à jour différentielle des dossiers déjà sauvegardés
     """
 
     def __init__(self) -> None:
@@ -104,14 +108,13 @@ class BackblazeUploaderApp(ctk.CTk):
         self.current_version = self.updater.get_local_version()
 
         self.title(f"Sauvegarde Automatisée Backblaze B2 — v{self.current_version}")
-        self.geometry("1220x840")
-        self.minsize(1060, 740)
+        self.geometry("1220x860")
+        self.minsize(1060, 760)
         self.configure(fg_color=COLOR_SURFACE)
 
-        # Chargement et application forcée de l'icône officielle partout (barre de titre + barre des tâches Windows)
+        # Chargement et application forcée de l'icône officielle partout
         self._tk_icons: List[ImageTk.PhotoImage] = []
         self._apply_window_icon()
-        # CustomTkinter réinitialise l'icône à 200ms dans son __init__, on la ré-applique donc après :
         self.after(210, self._apply_window_icon)
         self.after(550, self._apply_window_icon)
         self.after(1200, self._apply_window_icon)
@@ -132,12 +135,12 @@ class BackblazeUploaderApp(ctk.CTk):
         # Fichier log disque
         self.log_file_path = get_app_dir() / "sauvegarde_b2.log"
 
-        # Images de marque (conservées en attributs pour éviter le garbage collection)
+        # Images de marque
         self.sidebar_icon_img: Optional[ctk.CTkImage] = None
         self.header_logo_img: Optional[ctk.CTkImage] = None
         self._load_brand_images()
 
-        # Construction de l'interface graphique selon la maquette Dashboard
+        # Construction de l'interface graphique
         self._build_ui()
         self._load_config_into_ui()
 
@@ -156,7 +159,7 @@ class BackblazeUploaderApp(ctk.CTk):
     def _apply_window_icon(self) -> None:
         """
         Force l'application de l'icône officielle sur la fenêtre, la barre de titre,
-        Alt+Tab et la barre des tâches Windows (via iconbitmap + wm_iconphoto + API Win32 WM_SETICON).
+        Alt+Tab et la barre des tâches Windows.
         """
         ico_path = find_asset_path("icone_application_b2.ico") or find_asset_path("app_icon.ico")
         if ico_path:
@@ -182,7 +185,6 @@ class BackblazeUploaderApp(ctk.CTk):
             except Exception:
                 pass
 
-        # Application directe via l'API native Win32 (WM_SETICON sur le HWND de la fenêtre principale)
         if sys.platform == "win32" and ico_path:
             try:
                 self.update_idletasks()
@@ -210,7 +212,6 @@ class BackblazeUploaderApp(ctk.CTk):
                 pass
 
     def _load_brand_images(self) -> None:
-        """Charge le logo principal et l'icône en respectant strictement leurs proportions."""
         icon_file = find_asset_path("icone_128.png") or find_asset_path("icone_256.png")
         if icon_file:
             try:
@@ -235,7 +236,6 @@ class BackblazeUploaderApp(ctk.CTk):
                 pass
 
     def _build_ui(self) -> None:
-        """Construit la structure : Barre latérale Navy (#102A5E) + Zone Centrale Dashboard (#F2F6FC)."""
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -254,7 +254,6 @@ class BackblazeUploaderApp(ctk.CTk):
         self.sidebar.grid_columnconfigure(0, weight=1)
         self.sidebar.grid_rowconfigure(6, weight=1)
 
-        # En-tête de marque dans la barre latérale
         brand_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         brand_frame.grid(row=0, column=0, padx=16, pady=(20, 16), sticky="ew")
 
@@ -278,11 +277,9 @@ class BackblazeUploaderApp(ctk.CTk):
             anchor="w",
         ).grid(row=1, column=1, sticky="w")
 
-        # Séparateur subtil
         sep = ctk.CTkFrame(self.sidebar, height=1, fg_color="#23427D")
         sep.grid(row=1, column=0, padx=16, pady=(0, 12), sticky="ew")
 
-        # Boutons de navigation latérale (conformes à la maquette Dashboard)
         self.nav_buttons: Dict[str, ctk.CTkButton] = {}
         nav_items = [
             ("dashboard", "🏠   Tableau de bord"),
@@ -306,26 +303,24 @@ class BackblazeUploaderApp(ctk.CTk):
             btn.grid(row=idx, column=0, padx=14, pady=4, sticky="ew")
             self.nav_buttons[nav_key] = btn
 
-        # Encart d'information "Protection Active" en bas de la barre latérale
         info_card = ctk.CTkFrame(self.sidebar, fg_color="#163570", corner_radius=10)
         info_card.grid(row=7, column=0, padx=14, pady=8, sticky="ew")
 
         ctk.CTkLabel(
             info_card,
-            text="🛡️ Résilience Active",
+            text="🛡️ Résilience & Règles Actives",
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             text_color=COLOR_CYAN,
         ).pack(anchor="w", padx=12, pady=(10, 2))
 
         ctk.CTkLabel(
             info_card,
-            text="• Anti-corruption Excel (.bak)\n• Pause auto si coupure Internet\n• Reprise auto après coupure",
+            text="• Détection préfixe de dossiers\n• Image standard TAV (si vide)\n• Sync différentielle sur B2\n• Anti-coupure courant & réseau",
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
             text_color="#D0E1FD",
             justify="left",
         ).pack(anchor="w", padx=12, pady=(0, 10))
 
-        # Pied de barre latérale : Mise à jour à distance & Version
         footer_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         footer_frame.grid(row=8, column=0, padx=14, pady=(4, 16), sticky="ew")
         footer_frame.grid_columnconfigure(0, weight=1)
@@ -358,9 +353,7 @@ class BackblazeUploaderApp(ctk.CTk):
         self.main_area.grid_columnconfigure(0, weight=1)
         self.main_area.grid_rowconfigure(4, weight=1)
 
-        # ---------------------------------------------------------------------
-        # 0. Barre supérieure avec Logo officiel, message d'accueil et état global
-        # ---------------------------------------------------------------------
+        # 0. Barre supérieure
         top_bar = ctk.CTkFrame(
             self.main_area,
             fg_color=COLOR_BACKGROUND,
@@ -385,13 +378,12 @@ class BackblazeUploaderApp(ctk.CTk):
 
         welcome_sub = ctk.CTkLabel(
             top_bar,
-            text="Vos données sont en sécurité avec Backblaze B2 — Suivi clair et reprise automatique des opérations.",
+            text="Vos données sont en sécurité avec Backblaze B2 — Suivi clair et synchronisation intelligente des dossiers.",
             font=ctk.CTkFont(family=FONT_FAMILY, size=12),
             text_color=COLOR_TEXT_SECONDARY,
         )
         welcome_sub.grid(row=1, column=1, padx=4, pady=(0, 10), sticky="w")
 
-        # Badge d'état global dans la barre supérieure
         self.global_badge = ctk.CTkLabel(
             top_bar,
             text="  ● Système prêt  ",
@@ -403,9 +395,7 @@ class BackblazeUploaderApp(ctk.CTk):
         )
         self.global_badge.grid(row=0, column=2, rowspan=2, padx=16, pady=10, sticky="e")
 
-        # ---------------------------------------------------------------------
-        # 1. Rangée des 4 Cartes KPI (comme sur la Maquette Dashboard)
-        # ---------------------------------------------------------------------
+        # 1. Rangée des 4 Cartes KPI
         self.kpi_row = ctk.CTkFrame(self.main_area, fg_color="transparent")
         self.kpi_row.grid(row=1, column=0, pady=(0, 10), sticky="ew")
         self.kpi_row.grid_columnconfigure((0, 1, 2, 3), weight=1)
@@ -420,12 +410,10 @@ class BackblazeUploaderApp(ctk.CTk):
             self.kpi_row, 2, "📁", "#EDE9FE", "#6D28D9", "Dossiers traités", "0 / 0 dossiers"
         )
         self.kpi_files_val = self._create_kpi_card(
-            self.kpi_row, 3, "🛡️", "#E0F7FA", COLOR_CYAN, "Fichiers sauvegardés", "0 / 0 fichiers"
+            self.kpi_row, 3, "🛡️", "#E0F7FA", COLOR_CYAN, "Fichiers vérifiés / envoyés", "0 / 0 fichiers"
         )
 
-        # ---------------------------------------------------------------------
         # 2. Grille centrale : Carte Configuration B2 + Carte Sélection des Fichiers
-        # ---------------------------------------------------------------------
         self.forms_row = ctk.CTkFrame(self.main_area, fg_color="transparent")
         self.forms_row.grid(row=2, column=0, pady=(0, 10), sticky="ew")
         self.forms_row.grid_columnconfigure(0, weight=5)
@@ -449,7 +437,6 @@ class BackblazeUploaderApp(ctk.CTk):
             text_color=COLOR_NAVY,
         ).grid(row=0, column=0, columnspan=3, padx=16, pady=(12, 8), sticky="w")
 
-        # B2 Key ID
         ctk.CTkLabel(
             self.card_b2,
             text="B2 Key ID",
@@ -468,7 +455,6 @@ class BackblazeUploaderApp(ctk.CTk):
         )
         self.key_id_entry.grid(row=1, column=1, columnspan=2, padx=(0, 16), pady=5, sticky="ew")
 
-        # B2 Application Key
         ctk.CTkLabel(
             self.card_b2,
             text="Application Key",
@@ -504,7 +490,6 @@ class BackblazeUploaderApp(ctk.CTk):
         )
         self.show_key_btn.grid(row=2, column=2, padx=(0, 16), pady=5, sticky="e")
 
-        # Bucket Name + Bouton Tester
         ctk.CTkLabel(
             self.card_b2,
             text="Bucket Name",
@@ -539,7 +524,7 @@ class BackblazeUploaderApp(ctk.CTk):
         )
         self.test_conn_btn.grid(row=3, column=2, padx=(0, 16), pady=(5, 14), sticky="e")
 
-        # --- CARTE B : Sélection des Fichiers et Répertoires ---
+        # --- CARTE B : Sélection des Fichiers, Répertoires et Image Standard TAV ---
         self.card_files = ctk.CTkFrame(
             self.forms_row,
             fg_color=COLOR_BACKGROUND,
@@ -552,10 +537,10 @@ class BackblazeUploaderApp(ctk.CTk):
 
         ctk.CTkLabel(
             self.card_files,
-            text="📂  Sources & Fichiers Excel",
+            text="📂  Sources, Fichiers Excel & Image Standard TAV",
             font=ctk.CTkFont(family=FONT_FAMILY, size=15, weight="bold"),
             text_color=COLOR_NAVY,
-        ).grid(row=0, column=0, columnspan=4, padx=16, pady=(12, 8), sticky="w")
+        ).grid(row=0, column=0, columnspan=4, padx=16, pady=(12, 6), sticky="w")
 
         # Répertoire Parent
         ctk.CTkLabel(
@@ -563,7 +548,7 @@ class BackblazeUploaderApp(ctk.CTk):
             text="Répertoire Parent",
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             text_color=COLOR_NAVY,
-        ).grid(row=1, column=0, padx=(16, 8), pady=5, sticky="w")
+        ).grid(row=1, column=0, padx=(16, 8), pady=4, sticky="w")
         self.parent_dir_var = ctk.StringVar()
         self.parent_dir_entry = ctk.CTkEntry(
             self.card_files,
@@ -572,14 +557,14 @@ class BackblazeUploaderApp(ctk.CTk):
             fg_color=COLOR_SURFACE,
             border_color=COLOR_INPUT_BORDER,
             text_color=COLOR_NAVY,
-            height=32,
+            height=30,
         )
-        self.parent_dir_entry.grid(row=1, column=1, columnspan=2, padx=(0, 6), pady=5, sticky="ew")
+        self.parent_dir_entry.grid(row=1, column=1, columnspan=2, padx=(0, 6), pady=4, sticky="ew")
         self.browse_parent_btn = ctk.CTkButton(
             self.card_files,
             text="Parcourir...",
             width=100,
-            height=32,
+            height=30,
             corner_radius=8,
             fg_color=COLOR_BACKGROUND,
             border_width=1,
@@ -589,7 +574,7 @@ class BackblazeUploaderApp(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             command=self._browse_parent_dir,
         )
-        self.browse_parent_btn.grid(row=1, column=3, padx=(0, 16), pady=5, sticky="e")
+        self.browse_parent_btn.grid(row=1, column=3, padx=(0, 16), pady=4, sticky="e")
 
         # Excel Source (dossiers.xlsx)
         ctk.CTkLabel(
@@ -597,7 +582,7 @@ class BackblazeUploaderApp(ctk.CTk):
             text="Excel Source",
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             text_color=COLOR_NAVY,
-        ).grid(row=2, column=0, padx=(16, 8), pady=5, sticky="w")
+        ).grid(row=2, column=0, padx=(16, 8), pady=4, sticky="w")
         self.source_excel_var = ctk.StringVar()
         self.source_excel_entry = ctk.CTkEntry(
             self.card_files,
@@ -606,15 +591,15 @@ class BackblazeUploaderApp(ctk.CTk):
             fg_color=COLOR_SURFACE,
             border_color=COLOR_INPUT_BORDER,
             text_color=COLOR_NAVY,
-            height=32,
+            height=30,
         )
-        self.source_excel_entry.grid(row=2, column=1, padx=(0, 6), pady=5, sticky="ew")
+        self.source_excel_entry.grid(row=2, column=1, padx=(0, 6), pady=4, sticky="ew")
 
         self.gen_source_btn = ctk.CTkButton(
             self.card_files,
             text="Créer modèle",
             width=98,
-            height=32,
+            height=30,
             corner_radius=8,
             fg_color=COLOR_SURFACE,
             border_width=1,
@@ -624,13 +609,13 @@ class BackblazeUploaderApp(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
             command=self._generate_template_excel,
         )
-        self.gen_source_btn.grid(row=2, column=2, padx=(0, 6), pady=5, sticky="e")
+        self.gen_source_btn.grid(row=2, column=2, padx=(0, 6), pady=4, sticky="e")
 
         self.browse_source_btn = ctk.CTkButton(
             self.card_files,
             text="Parcourir...",
             width=100,
-            height=32,
+            height=30,
             corner_radius=8,
             fg_color=COLOR_BACKGROUND,
             border_width=1,
@@ -640,7 +625,7 @@ class BackblazeUploaderApp(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             command=self._browse_source_excel,
         )
-        self.browse_source_btn.grid(row=2, column=3, padx=(0, 16), pady=5, sticky="e")
+        self.browse_source_btn.grid(row=2, column=3, padx=(0, 16), pady=4, sticky="e")
 
         # Excel Sortie (resultats_backblaze.xlsx)
         ctk.CTkLabel(
@@ -648,7 +633,7 @@ class BackblazeUploaderApp(ctk.CTk):
             text="Excel Sortie",
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             text_color=COLOR_NAVY,
-        ).grid(row=3, column=0, padx=(16, 8), pady=(5, 14), sticky="w")
+        ).grid(row=3, column=0, padx=(16, 8), pady=4, sticky="w")
         self.output_excel_var = ctk.StringVar()
         self.output_excel_entry = ctk.CTkEntry(
             self.card_files,
@@ -657,14 +642,14 @@ class BackblazeUploaderApp(ctk.CTk):
             fg_color=COLOR_SURFACE,
             border_color=COLOR_INPUT_BORDER,
             text_color=COLOR_NAVY,
-            height=32,
+            height=30,
         )
-        self.output_excel_entry.grid(row=3, column=1, columnspan=2, padx=(0, 6), pady=(5, 14), sticky="ew")
+        self.output_excel_entry.grid(row=3, column=1, columnspan=2, padx=(0, 6), pady=4, sticky="ew")
         self.browse_output_btn = ctk.CTkButton(
             self.card_files,
             text="Parcourir...",
             width=100,
-            height=32,
+            height=30,
             corner_radius=8,
             fg_color=COLOR_BACKGROUND,
             border_width=1,
@@ -674,11 +659,43 @@ class BackblazeUploaderApp(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
             command=self._browse_output_excel,
         )
-        self.browse_output_btn.grid(row=3, column=3, padx=(0, 16), pady=(5, 14), sticky="e")
+        self.browse_output_btn.grid(row=3, column=3, padx=(0, 16), pady=4, sticky="e")
 
-        # ---------------------------------------------------------------------
-        # 3. Carte de Contrôle, Barre de Progression & Actions (Section 6 Charte)
-        # ---------------------------------------------------------------------
+        # Image Standard TAV (fournie une fois pour toutes pour les dossiers vides commençant par TAV)
+        ctk.CTkLabel(
+            self.card_files,
+            text="Image Standard TAV",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color=COLOR_NAVY,
+        ).grid(row=4, column=0, padx=(16, 8), pady=(4, 12), sticky="w")
+        self.tav_image_var = ctk.StringVar()
+        self.tav_image_entry = ctk.CTkEntry(
+            self.card_files,
+            textvariable=self.tav_image_var,
+            placeholder_text="Image standard (fournie 1 fois pour toutes) pour les dossiers TAV vides...",
+            fg_color=COLOR_SURFACE,
+            border_color=COLOR_INPUT_BORDER,
+            text_color=COLOR_NAVY,
+            height=30,
+        )
+        self.tav_image_entry.grid(row=4, column=1, columnspan=2, padx=(0, 6), pady=(4, 12), sticky="ew")
+        self.browse_tav_btn = ctk.CTkButton(
+            self.card_files,
+            text="Choisir image...",
+            width=100,
+            height=30,
+            corner_radius=8,
+            fg_color=COLOR_BACKGROUND,
+            border_width=1,
+            border_color=COLOR_PRIMARY,
+            text_color=COLOR_PRIMARY,
+            hover_color=COLOR_SURFACE,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            command=self._browse_tav_standard_image,
+        )
+        self.browse_tav_btn.grid(row=4, column=3, padx=(0, 16), pady=(4, 12), sticky="e")
+
+        # 3. Carte de Contrôle, Barre de Progression & Actions
         self.card_control = ctk.CTkFrame(
             self.main_area,
             fg_color=COLOR_BACKGROUND,
@@ -692,7 +709,6 @@ class BackblazeUploaderApp(ctk.CTk):
         btn_bar = ctk.CTkFrame(self.card_control, fg_color="transparent")
         btn_bar.grid(row=0, column=0, padx=16, pady=(12, 8), sticky="ew")
 
-        # Bouton Primaire : Bleu principal (#0878F9), texte blanc, libellé explicite
         self.start_btn = ctk.CTkButton(
             btn_bar,
             text="☁️  Lancer une sauvegarde",
@@ -703,11 +719,10 @@ class BackblazeUploaderApp(ctk.CTk):
             fg_color=COLOR_PRIMARY,
             hover_color=COLOR_PRIMARY_HOVER,
             text_color=COLOR_BACKGROUND,
-            command=self._start_backup,
+            command=lambda: self._start_backup(is_power_loss_resume=False),
         )
         self.start_btn.pack(side="left", padx=(0, 10))
 
-        # Boutons Secondaires : Fond blanc (#FFFFFF), bordure bleu pâle (#0878F9), texte bleu
         self.pause_btn = ctk.CTkButton(
             btn_bar,
             text="⏸  Pause",
@@ -742,7 +757,6 @@ class BackblazeUploaderApp(ctk.CTk):
         )
         self.resume_btn.pack(side="left", padx=5)
 
-        # Bouton d'Alerte / Danger : Rouge accent (#E51B23), texte blanc, avec confirmation
         self.stop_btn = ctk.CTkButton(
             btn_bar,
             text="⚠️  Interrompre",
@@ -758,7 +772,6 @@ class BackblazeUploaderApp(ctk.CTk):
         )
         self.stop_btn.pack(side="left", padx=5)
 
-        # Bouton secondaire à droite : Ouvrir Résultats Excel
         self.open_output_btn = ctk.CTkButton(
             btn_bar,
             text="📊  Ouvrir Résultats Excel",
@@ -775,7 +788,6 @@ class BackblazeUploaderApp(ctk.CTk):
         )
         self.open_output_btn.pack(side="right", padx=(6, 0))
 
-        # Bandeau de progression dans la carte de contrôle
         prog_box = ctk.CTkFrame(
             self.card_control,
             fg_color=COLOR_SURFACE,
@@ -824,9 +836,7 @@ class BackblazeUploaderApp(ctk.CTk):
         )
         self.Counters_label.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="w")
 
-        # ---------------------------------------------------------------------
         # 4. Carte Journal d'Exécution & Historique des Opérations
-        # ---------------------------------------------------------------------
         self.card_logs = ctk.CTkFrame(
             self.main_area,
             fg_color=COLOR_BACKGROUND,
@@ -884,6 +894,7 @@ class BackblazeUploaderApp(ctk.CTk):
             self.parent_dir_var,
             self.source_excel_var,
             self.output_excel_var,
+            self.tav_image_var,
         ):
             var.trace_add("write", lambda *_: self._save_current_config())
 
@@ -897,7 +908,6 @@ class BackblazeUploaderApp(ctk.CTk):
         title: str,
         initial_val: str,
     ) -> ctk.CTkLabel:
-        """Crée une carte d'indicateur clé (KPI Card) fidèle à la Maquette Dashboard."""
         padx = (0, 6) if col == 0 else ((6, 0) if col == 3 else (6, 6))
         card = ctk.CTkFrame(
             parent,
@@ -940,7 +950,6 @@ class BackblazeUploaderApp(ctk.CTk):
         return val_lbl
 
     def _switch_view(self, view_key: str) -> None:
-        """Gère la navigation latérale de la maquette tout en gardant le travail actif."""
         for k, btn in self.nav_buttons.items():
             is_active = k == view_key
             btn.configure(
@@ -977,7 +986,6 @@ class BackblazeUploaderApp(ctk.CTk):
             self.card_logs.grid()
 
     def _update_global_badge(self, text: str, mode: str = "ready") -> None:
-        """Met à jour le badge d'état en haut à droite avec texte + couleur (Règle 6 Charte)."""
         if mode == "running":
             self.global_badge.configure(
                 text=f"  ⟳ {text}  ", fg_color="#E0F2FE", text_color=COLOR_PRIMARY
@@ -1005,20 +1013,26 @@ class BackblazeUploaderApp(ctk.CTk):
             self.kpi_state_val.configure(text="● Prêt à démarrer", text_color=COLOR_NAVY)
 
     def _load_config_into_ui(self) -> None:
-        """Pré-remplit les champs avec les dernières valeurs mémorisées."""
         self.key_id_var.set(self.saved_config.get("b2_key_id", ""))
         self.app_key_var.set(self.saved_config.get("b2_app_key", ""))
         self.bucket_var.set(self.saved_config.get("bucket_name", ""))
         self.parent_dir_var.set(self.saved_config.get("parent_dir", ""))
         self.source_excel_var.set(self.saved_config.get("source_excel", ""))
         self.output_excel_var.set(self.saved_config.get("output_excel", ""))
+
+        tav_img = self.saved_config.get("tav_standard_image_path", "")
+        if not tav_img:
+            default_tav = find_asset_path("image_standard_tav.png")
+            if default_tav:
+                tav_img = str(default_tav)
+        self.tav_image_var.set(tav_img)
+
         self._append_log(
-            f"Application v{self.current_version} prête. Configuration simple et reprise après échec activées.",
+            f"Application v{self.current_version} prête. Détection par préfixe, gestion TAV vide et synchronisation B2 activées.",
             "INFO",
         )
 
     def _save_current_config(self) -> None:
-        """Sauvegarde atomique des valeurs actuelles dans config.json."""
         data = {
             "b2_key_id": self.key_id_var.get().strip(),
             "b2_app_key": self.app_key_var.get().strip(),
@@ -1026,6 +1040,7 @@ class BackblazeUploaderApp(ctk.CTk):
             "parent_dir": self.parent_dir_var.get().strip(),
             "source_excel": self.source_excel_var.get().strip(),
             "output_excel": self.output_excel_var.get().strip(),
+            "tav_standard_image_path": self.tav_image_var.get().strip(),
             "auto_resume_after_power_loss": True,
         }
         self.config_manager.save(data)
@@ -1061,7 +1076,7 @@ class BackblazeUploaderApp(ctk.CTk):
             )
             self._update_global_badge("Reprise auto", "warning")
             self.status_label.configure(text="⚡ Reprise automatique suite à une coupure de courant...")
-            self.after(1200, self._start_backup)
+            self.after(1200, lambda: self._start_backup(is_power_loss_resume=True))
 
     # =========================================================================
     # Mise à jour à distance via GitHub (pour postes distants)
@@ -1111,7 +1126,7 @@ class BackblazeUploaderApp(ctk.CTk):
         self.destroy()
 
     # =========================================================================
-    # Sélecteurs de fichiers / répertoires
+    # Sélecteurs de fichiers / répertoires / image standard TAV
     # =========================================================================
     def _browse_parent_dir(self) -> None:
         initial = self.parent_dir_var.get().strip()
@@ -1147,6 +1162,24 @@ class BackblazeUploaderApp(ctk.CTk):
         )
         if chosen:
             self.output_excel_var.set(os.path.normpath(chosen))
+
+    def _browse_tav_standard_image(self) -> None:
+        initial_file = self.tav_image_var.get().strip()
+        initial_dir = str(Path(initial_file).parent) if initial_file and os.path.exists(initial_file) else str(get_app_dir())
+        chosen = filedialog.askopenfilename(
+            title="Sélectionner l'Image Standard pour les dossiers TAV vides (fournie une fois pour toutes)",
+            initialdir=initial_dir,
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.gif")],
+        )
+        if chosen:
+            norm_chosen = os.path.normpath(chosen)
+            self.tav_image_var.set(norm_chosen)
+            # Réinitialiser l'URL en cache pour que la nouvelle image choisie soit téléversée au prochain besoin
+            cfg = self.config_manager.load()
+            cfg["tav_standard_image_path"] = norm_chosen
+            cfg["tav_standard_image_url"] = ""
+            self.config_manager.save(cfg)
+            self._append_log(f"Image standard TAV enregistrée une fois pour toutes : {norm_chosen}", "SUCCESS")
 
     def _generate_template_excel(self) -> None:
         parent_dir = self.parent_dir_var.get().strip()
@@ -1191,7 +1224,7 @@ class BackblazeUploaderApp(ctk.CTk):
         if not output_path or not os.path.exists(output_path):
             messagebox.showinfo(
                 "Fichier non disponible",
-                "Le fichier Excel de sortie n'existe pas encore. Il sera généré dès le premier fichier média sauvegardé.",
+                "Le fichier Excel de sortie n'existe pas encore. Il sera généré dès le premier dossier traité.",
             )
             return
         try:
@@ -1243,7 +1276,7 @@ class BackblazeUploaderApp(ctk.CTk):
     # =========================================================================
     # Contrôles : Lancer / Pause / Reprendre / Interrompre
     # =========================================================================
-    def _start_backup(self) -> None:
+    def _start_backup(self, is_power_loss_resume: bool = False) -> None:
         if self.is_running:
             return
 
@@ -1253,6 +1286,7 @@ class BackblazeUploaderApp(ctk.CTk):
         parent_dir = self.parent_dir_var.get().strip()
         source_excel = self.source_excel_var.get().strip()
         output_excel = self.output_excel_var.get().strip()
+        tav_std_img = self.tav_image_var.get().strip()
 
         if not key_id or not app_key or not bucket_name:
             messagebox.showwarning(
@@ -1280,7 +1314,11 @@ class BackblazeUploaderApp(ctk.CTk):
             self.output_excel_var.set(output_excel)
 
         self._save_current_config()
-        self.config_manager.mark_session_active(True)
+
+        if not is_power_loss_resume:
+            self.config_manager.mark_session_active(True, current_folder="", last_completed_row=0)
+        else:
+            self.config_manager.mark_session_active(True)
 
         self.is_running = True
         self.pause_event.set()
@@ -1288,11 +1326,20 @@ class BackblazeUploaderApp(ctk.CTk):
 
         self._set_controls_state(running=True, paused=False)
         self._update_global_badge("Sauvegarde en cours", "running")
-        self.status_label.configure(text="Initialisation du transfert vers le stockage cloud...")
+        self.status_label.configure(text="Initialisation du transfert et vérification des dossiers...")
 
         self.worker_thread = threading.Thread(
             target=self._backup_worker,
-            args=(key_id, app_key, bucket_name, parent_dir, source_excel, output_excel),
+            args=(
+                key_id,
+                app_key,
+                bucket_name,
+                parent_dir,
+                source_excel,
+                output_excel,
+                tav_std_img,
+                is_power_loss_resume,
+            ),
             daemon=True,
         )
         self.worker_thread.start()
@@ -1343,6 +1390,7 @@ class BackblazeUploaderApp(ctk.CTk):
             self.browse_parent_btn.configure(state="normal")
             self.browse_source_btn.configure(state="normal")
             self.browse_output_btn.configure(state="normal")
+            self.browse_tav_btn.configure(state="normal")
             self.gen_source_btn.configure(state="normal")
         else:
             self.start_btn.configure(state="disabled")
@@ -1350,6 +1398,7 @@ class BackblazeUploaderApp(ctk.CTk):
             self.browse_parent_btn.configure(state="disabled")
             self.browse_source_btn.configure(state="disabled")
             self.browse_output_btn.configure(state="disabled")
+            self.browse_tav_btn.configure(state="disabled")
             self.gen_source_btn.configure(state="disabled")
             self.stop_btn.configure(state="normal")
             if paused:
@@ -1370,90 +1419,88 @@ class BackblazeUploaderApp(ctk.CTk):
         parent_dir: str,
         source_excel: str,
         output_excel: str,
+        tav_std_img: str,
+        is_power_loss_resume: bool = False,
     ) -> None:
         try:
             self._queue_log("=" * 72, "INFO")
-            self._queue_log("DÉMARRAGE DE LA SAUVEGARDE VERS LE STOCKAGE CLOUD BACKBLAZE B2", "INFO")
+            self._queue_log("DÉMARRAGE DE LA SAUVEGARDE & SYNCHRONISATION BACKBLAZE B2", "INFO")
             self._queue_log(f"Répertoire Parent : {parent_dir}", "INFO")
             self._queue_log(f"Fichier Source    : {source_excel}", "INFO")
             self._queue_log(f"Fichier Sortie    : {output_excel}", "INFO")
 
             folders_info = ExcelManager.read_source_folders(source_excel)
             total_listed = len(folders_info)
-            already_completed = [f for f in folders_info if f["completed"]]
-            pending_folders = [f for f in folders_info if not f["completed"]]
 
-            self._queue_log(
-                f"Analyse de '{Path(source_excel).name}' : {total_listed} dossier(s) au total | "
-                f"{len(already_completed)} déjà 'Terminé' (ignorés) | {len(pending_folders)} à traiter.",
-                "INFO",
-            )
-
-            for skipped in already_completed:
-                self._queue_log(f"⏭ Dossier ignoré (Statut = Terminé) : {skipped['dossier']}", "INFO")
-
-            if not pending_folders:
+            if total_listed == 0:
                 self.config_manager.mark_session_active(False)
-                self._queue_progress(
-                    folders_done=total_listed,
-                    folders_total=total_listed,
-                    files_done=0,
-                    files_total=0,
-                    bytes_done=0,
-                    bytes_total=0,
-                    status_text="✔ Sauvegarde terminée — Tous les dossiers sont à jour.",
-                    fraction=1.0,
-                )
-                self._queue_log("Sauvegarde terminée : aucun dossier restant à traiter.", "SUCCESS")
+                self._queue_log("Le fichier Excel source ne contient aucun nom de dossier.", "WARN")
                 self.ui_queue.put({"type": "finished", "cancelled": False, "error": None})
                 return
 
-            self._queue_status("Analyse de l'arborescence et calcul du volume à sauvegarder...")
+            # Si on reprend après une coupure de courant en cours de session, on reprend à la ligne interrompue
+            state_journal = self.config_manager.load_state_journal()
+            last_row_done = int(state_journal.get("last_completed_row_in_run", 0)) if is_power_loss_resume else 0
+
+            # 1. Résolution des dossiers (correspondance exacte ou par préfixe) et calcul du volume
+            self._queue_status("Résolution des dossiers (préfixe inclus) et analyse du contenu...")
+            parent_path = Path(parent_dir)
             total_files_all = 0
             total_bytes_all = 0
-            valid_pending: List[Dict[str, Any]] = []
+            resolved_items: List[Dict[str, Any]] = []
 
-            for item in pending_folders:
+            for item in folders_info:
                 if self.stop_event.is_set():
                     raise UploadCancelledError("Sauvegarde interrompue par l'utilisateur.")
-                folder_path = Path(parent_dir) / item["dossier"]
-                if not folder_path.exists() or not folder_path.is_dir():
+
+                excel_name = item["dossier"]
+                matched_folder = resolve_matching_folder(parent_path, excel_name)
+
+                if matched_folder is None:
                     self._queue_log(
-                        f"⚠ Dossier '{item['dossier']}' introuvable dans '{parent_dir}' — ignoré.",
+                        f"⚠ Aucun dossier commençant par '{excel_name}' n'a été trouvé dans '{parent_dir}'.",
                         "WARN",
                     )
                     continue
 
-                files_in_folder = B2UploaderService.scan_folder_files(folder_path)
+                if matched_folder.name != excel_name:
+                    self._queue_log(
+                        f"🔎 Dossier Excel '{excel_name}' associé par préfixe au dossier : '{matched_folder.name}'",
+                        "INFO",
+                    )
+
+                files_in_folder = B2UploaderService.scan_folder_files(matched_folder)
                 folder_bytes = sum(fp.stat().st_size for fp, _, _ in files_in_folder)
-                item["folder_path"] = folder_path
+
+                item["folder_path"] = matched_folder
                 item["files_count"] = len(files_in_folder)
                 item["folder_bytes"] = folder_bytes
                 total_files_all += len(files_in_folder)
                 total_bytes_all += folder_bytes
-                valid_pending.append(item)
+                resolved_items.append(item)
 
-            if not valid_pending:
+            if not resolved_items:
                 self.config_manager.mark_session_active(False)
                 self._queue_log(
-                    "Aucun des dossiers à traiter n'a été trouvé dans le Répertoire Parent sélectionné.",
+                    "Aucun dossier correspondant aux lignes du fichier Excel n'a été trouvé dans le Répertoire Parent.",
                     "WARN",
                 )
                 self.ui_queue.put(
                     {
                         "type": "finished",
                         "cancelled": False,
-                        "error": "Aucun dossier valide trouvé dans le Répertoire Parent.",
+                        "error": "Aucun dossier correspondant trouvé dans le Répertoire Parent.",
                     }
                 )
                 return
 
             self._queue_log(
-                f"Volume global à traiter : {len(valid_pending)} dossier(s), "
-                f"{total_files_all} fichier(s) éligible(s), taille totale : {format_size(total_bytes_all)}.",
+                f"Analyse terminée : {len(resolved_items)} dossier(s) résolu(s), "
+                f"{total_files_all} fichier(s) éligible(s), volume total : {format_size(total_bytes_all)}.",
                 "INFO",
             )
 
+            # 2. Connexion à Backblaze B2
             self._queue_status(f"Connexion au bucket Backblaze B2 '{bucket_name}'...")
             uploader = B2UploaderService(
                 key_id=key_id,
@@ -1467,43 +1514,133 @@ class BackblazeUploaderApp(ctk.CTk):
             uploader.connect()
             self._queue_log(f"Connecté avec succès au bucket Backblaze B2 '{bucket_name}'.", "SUCCESS")
 
-            folders_done_count = len(already_completed)
+            # Cache pour l'URL unique de l'image standard TAV
+            cached_tav_url: str = self.config_manager.load().get("tav_standard_image_url", "").strip()
+
+            folders_done_count = 0
             files_done_count = 0
             bytes_done_count = 0
-
-            state_journal = self.config_manager.load_state_journal()
             local_journal_files: Dict[str, Any] = state_journal.get("uploaded_files", {})
 
             self._queue_progress(
-                folders_done=folders_done_count,
-                folders_total=total_listed,
-                files_done=files_done_count,
+                folders_done=0,
+                folders_total=len(resolved_items),
+                files_done=0,
                 files_total=total_files_all,
-                bytes_done=bytes_done_count,
+                bytes_done=0,
                 bytes_total=total_bytes_all,
-                status_text="Transfert vers le stockage cloud en cours...",
+                status_text="Traitement et vérification des dossiers en cours...",
                 fraction=0.0,
             )
 
-            for idx, item in enumerate(valid_pending, start=1):
-                dossier_name = item["dossier"]
+            # 3. Traitement de chaque dossier résolu
+            for idx, item in enumerate(resolved_items, start=1):
+                excel_dossier_name = item["dossier"]
                 row_index = item["row_index"]
                 folder_path: Path = item["folder_path"]
+                files_count: int = item["files_count"]
+                folder_bytes: int = item["folder_bytes"]
 
-                self.config_manager.mark_session_active(True, current_folder=dossier_name)
+                # En cas de reprise après coupure électrique, sauter les lignes déjà validées dans la même session
+                if is_power_loss_resume and last_row_done > 0 and row_index <= last_row_done:
+                    folders_done_count += 1
+                    files_done_count += files_count
+                    bytes_done_count += folder_bytes
+                    continue
+
+                self.config_manager.mark_session_active(
+                    True, current_folder=excel_dossier_name, last_completed_row=last_row_done
+                )
 
                 self._queue_log("-" * 64, "INFO")
                 self._queue_log(
-                    f"📁 [{idx}/{len(valid_pending)}] Traitement du dossier : '{dossier_name}' "
-                    f"({item['files_count']} fichier(s), {format_size(item['folder_bytes'])})",
+                    f"📁 [{idx}/{len(resolved_items)}] Dossier Excel : '{excel_dossier_name}' "
+                    f"(Dossier disque : '{folder_path.name}' — {files_count} fichier(s), {format_size(folder_bytes)})",
                     "INFO",
                 )
-                self._queue_status(f"En cours : {dossier_name} ({idx}/{len(valid_pending)})")
+                self._queue_status(f"Traitement : {excel_dossier_name} ({idx}/{len(resolved_items)})")
 
+                # =============================================================
+                # CAS 1 : LE DOSSIER À SAUVEGARDER EST VIDE (0 fichier éligible)
+                # =============================================================
+                if files_count == 0:
+                    if is_tav_folder(excel_dossier_name, folder_path):
+                        # Dossier vide commençant par "TAV" :
+                        # -> Ne pas téléverser le dossier sur B2
+                        # -> Mettre le lien unique de l'image standard dans l'Excel final
+                        if not cached_tav_url:
+                            img_src = tav_std_img
+                            if not img_src:
+                                default_asset = find_asset_path("image_standard_tav.png")
+                                if default_asset:
+                                    img_src = str(default_asset)
+                            cached_tav_url = uploader.ensure_tav_standard_image_url(img_src)
+                            cfg = self.config_manager.load()
+                            cfg["tav_standard_image_url"] = cached_tav_url
+                            self.config_manager.save(cfg)
+
+                        ExcelManager.upsert_output_result(
+                            output_path=output_excel,
+                            dossier_name=excel_dossier_name,
+                            image_links=[cached_tav_url],
+                            video_links=[],
+                        )
+                        self._queue_log(
+                            f"  🖼 Dossier '{excel_dossier_name}' vide (préfixe 'TAV') : "
+                            f"dossier non enregistré sur B2, lien de l'image standard inscrit dans l'Excel final.",
+                            "WARN",
+                        )
+                    else:
+                        # Dossier vide ne commençant PAS par "TAV" :
+                        # -> Ne pas téléverser le dossier sur B2 et ne RIEN mettre dans l'Excel final
+                        self._queue_log(
+                            f"  ⚪ Dossier '{excel_dossier_name}' vide (hors 'TAV') : "
+                            "dossier non enregistré sur B2 et rien n'est inscrit dans l'Excel final.",
+                            "WARN",
+                        )
+
+                    # Dans les deux cas de dossier vide : écrire "Dossier vide" dans le premier fichier Excel (dossiers.xlsx)
+                    ExcelManager.update_source_status(
+                        source_path=source_excel,
+                        row_index=row_index,
+                        dossier_name=excel_dossier_name,
+                        status="Dossier vide",
+                    )
+                    self._queue_log(
+                        f"  📝 Statut mis à jour dans l'Excel source pour '{excel_dossier_name}' : 'Dossier vide'.",
+                        "INFO",
+                    )
+
+                    folders_done_count += 1
+                    last_row_done = row_index
+                    self.config_manager.mark_session_active(
+                        True, current_folder=excel_dossier_name, last_completed_row=last_row_done
+                    )
+
+                    frac = (
+                        min(bytes_done_count / total_bytes_all, 1.0)
+                        if total_bytes_all > 0
+                        else min(folders_done_count / max(len(resolved_items), 1), 1.0)
+                    )
+                    self._queue_progress(
+                        folders_done=folders_done_count,
+                        folders_total=len(resolved_items),
+                        files_done=files_done_count,
+                        files_total=total_files_all,
+                        bytes_done=bytes_done_count,
+                        bytes_total=total_bytes_all,
+                        status_text=f"Dossier vide traité : {excel_dossier_name}",
+                        fraction=frac,
+                    )
+                    continue
+
+                # =============================================================
+                # CAS 2 : DOSSIER NON VIDE (NOUVEAU OU DÉJÀ SAUVEGARDÉ SUR B2)
+                # =============================================================
                 ExcelManager.update_source_status(
                     source_path=source_excel,
                     row_index=row_index,
-                    dossier_name=dossier_name,
+                    dossier_name=excel_dossier_name,
                     status="En cours",
                 )
 
@@ -1520,16 +1657,16 @@ class BackblazeUploaderApp(ctk.CTk):
                     elif total_files_all > 0:
                         frac = min(files_done_count / total_files_all, 1.0)
                     else:
-                        frac = min((folders_done_count + 1) / max(total_listed, 1), 1.0)
+                        frac = min((folders_done_count + 1) / max(len(resolved_items), 1), 1.0)
 
                     self._queue_progress(
                         folders_done=folders_done_count,
-                        folders_total=total_listed,
+                        folders_total=len(resolved_items),
                         files_done=files_done_count,
                         files_total=total_files_all,
                         bytes_done=bytes_done_count,
                         bytes_total=total_bytes_all,
-                        status_text=f"Transfert en cours : {dossier_name} — {file_path.name}",
+                        status_text=f"Traitement : {excel_dossier_name} — {file_path.name}",
                         fraction=frac,
                     )
 
@@ -1541,72 +1678,81 @@ class BackblazeUploaderApp(ctk.CTk):
                 ) -> None:
                     ExcelManager.upsert_output_result(
                         output_path=output_excel,
-                        dossier_name=dossier_name,
+                        dossier_name=excel_dossier_name,
                         image_links=partial_imgs,
                         video_links=partial_vids,
                     )
 
-                root_images, root_videos, uploaded_count, _ = uploader.upload_folder(
+                # Compare le dossier source avec le dossier sauvegardé sur B2 :
+                # - s'il est identique : ne fait rien sur B2
+                # - s'il est différent : met à jour le dossier sur B2
+                # - dans les deux cas : retourne les liens des images et vidéos pour l'Excel final
+                root_images, root_videos, uploaded_count, _, sync_state = uploader.upload_folder(
                     folder_path=folder_path,
                     local_journal_files=local_journal_files,
                     on_file_uploaded=_on_file_done,
                     on_root_links_updated=_on_root_links_updated,
                 )
 
+                # Dans les deux cas (identique ou mis à jour), inscrire les liens dans l'Excel final
                 ExcelManager.upsert_output_result(
                     output_path=output_excel,
-                    dossier_name=dossier_name,
+                    dossier_name=excel_dossier_name,
                     image_links=root_images,
                     video_links=root_videos,
                 )
                 self._queue_log(
-                    f"  📊 Excel de sortie consolidé pour '{dossier_name}' "
-                    f"({len(root_images)} lien(s) image racine, {len(root_videos)} lien(s) vidéo racine).",
+                    f"  📊 Liens inscrits dans l'Excel final pour '{excel_dossier_name}' "
+                    f"({len(root_images)} image(s) racine, {len(root_videos)} vidéo(s) racine — état B2 : {sync_state}).",
                     "INFO",
                 )
 
                 ExcelManager.update_source_status(
                     source_path=source_excel,
                     row_index=row_index,
-                    dossier_name=dossier_name,
+                    dossier_name=excel_dossier_name,
                     status="Terminé",
                 )
                 folders_done_count += 1
+                last_row_done = row_index
+                self.config_manager.mark_session_active(
+                    True, current_folder=excel_dossier_name, last_completed_row=last_row_done
+                )
 
                 frac = (
                     min(bytes_done_count / total_bytes_all, 1.0)
                     if total_bytes_all > 0
-                    else min(folders_done_count / max(total_listed, 1), 1.0)
+                    else min(folders_done_count / max(len(resolved_items), 1), 1.0)
                 )
                 self._queue_progress(
                     folders_done=folders_done_count,
-                    folders_total=total_listed,
+                    folders_total=len(resolved_items),
                     files_done=files_done_count,
                     files_total=total_files_all,
                     bytes_done=bytes_done_count,
                     bytes_total=total_bytes_all,
-                    status_text=f"✔ Dossier sauvegardé : {dossier_name}",
+                    status_text=f"✔ Dossier traité : {excel_dossier_name}",
                     fraction=frac,
                 )
                 self._queue_log(
-                    f"✔ Dossier '{dossier_name}' sauvegardé avec succès et marqué 'Terminé'.",
+                    f"✔ Dossier '{excel_dossier_name}' finalisé et marqué 'Terminé'.",
                     "SUCCESS",
                 )
 
-            self.config_manager.mark_session_active(False, current_folder="")
+            self.config_manager.mark_session_active(False, current_folder="", last_completed_row=0)
 
             self._queue_progress(
                 folders_done=folders_done_count,
-                folders_total=total_listed,
+                folders_total=len(resolved_items),
                 files_done=files_done_count,
                 files_total=total_files_all,
                 bytes_done=bytes_done_count,
                 bytes_total=total_bytes_all,
-                status_text="✔ Sauvegarde terminée — Vos données ont été sauvegardées avec succès sur Backblaze B2.",
+                status_text="✔ Sauvegarde terminée — Tous les dossiers ont été vérifiés et consignés.",
                 fraction=1.0,
             )
             self._queue_log("=" * 72, "INFO")
-            self._queue_log("✔ SAUVEGARDE TERMINÉE : TOUS LES DOSSIERS SONT SYNCHRONISÉS ET VÉRIFIABLES.", "SUCCESS")
+            self._queue_log("✔ OPÉRATION TERMINÉE : TOUS LES DOSSIERS SONT SYNCHRONISÉS ET CONSIGNÉS.", "SUCCESS")
             self.ui_queue.put({"type": "finished", "cancelled": False, "error": None})
 
         except UploadCancelledError as e:
@@ -1764,8 +1910,8 @@ class BackblazeUploaderApp(ctk.CTk):
                     else:
                         self._update_global_badge("Sauvegarde réussie", "success")
                         messagebox.showinfo(
-                            "Sauvegarde réussie !",
-                            "Vos données ont été sauvegardées avec succès sur Backblaze B2 et le fichier Excel de résultats est à jour.",
+                            "Sauvegarde terminée !",
+                            "Tous les dossiers ont été traités et synchronisés avec succès sur Backblaze B2.",
                         )
 
         except queue.Empty:
@@ -1810,8 +1956,6 @@ class BackblazeUploaderApp(ctk.CTk):
 
 
 if __name__ == "__main__":
-    # Si exécuté depuis le .exe compilé et qu'une version mise à jour de app.py est présente sur le disque,
-    # on l'exécute directement dans le processus .exe (pour conserver l'icône native dans la barre des tâches Windows) :
     if getattr(sys, "frozen", False) and not os.environ.get("_B2_EXTERNAL_LOADED"):
         _ext_app = get_app_dir() / "app.py"
         if _ext_app.exists():

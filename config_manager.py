@@ -10,7 +10,6 @@ def get_app_dir() -> Path:
     """Retourne le dossier de l'application (compatible script Python et exécutable PyInstaller)."""
     if getattr(sys, "frozen", False):
         exe_dir = Path(sys.executable).resolve().parent
-        # Si exécuté depuis dist/BackblazeB2Uploader/BackblazeB2Uploader.exe, remonter à la racine du projet si présente
         if exe_dir.name == "BackblazeB2Uploader" and exe_dir.parent.name == "dist":
             proj_root = exe_dir.parent.parent
             if (proj_root / "app.py").exists() or (proj_root / "config.json").exists():
@@ -22,9 +21,6 @@ def get_app_dir() -> Path:
 def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
     """
     Écrit un fichier JSON de manière 100% atomique (anti-corruption en cas de coupure de courant).
-    1. Sauvegarde l'ancien fichier valide en `.bak`
-    2. Écrit dans `.tmp` + `flush()` + `os.fsync()`
-    3. Remplace atomiquement via `os.replace()`
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -68,7 +64,7 @@ def safe_read_json(path: Path) -> Optional[Dict[str, Any]]:
 
 
 class ConfigManager:
-    """Gère la persistance atomique des identifiants B2, des chemins et de l'état de reprise après coupure."""
+    """Gère la persistance atomique des identifiants B2, des chemins, de l'image standard TAV et de l'état de reprise."""
 
     DEFAULT_CONFIG: Dict[str, Any] = {
         "b2_key_id": "",
@@ -77,6 +73,8 @@ class ConfigManager:
         "parent_dir": "",
         "source_excel": "",
         "output_excel": "",
+        "tav_standard_image_path": "",
+        "tav_standard_image_url": "",
         "auto_resume_after_power_loss": True,
     }
 
@@ -118,9 +116,11 @@ class ConfigManager:
 
     def save(self, data: Dict[str, Any]) -> None:
         """Sauvegarde atomique de la configuration sur le disque (local + AppData)."""
+        # Conserver les clés existantes non fournies dans `data` (ex: tav_standard_image_url)
+        existing = safe_read_json(self.local_config_path) or safe_read_json(self.appdata_config_path) or {}
         clean_data: Dict[str, Any] = {}
         for key, default_val in self.DEFAULT_CONFIG.items():
-            val = data.get(key, default_val)
+            val = data.get(key, existing.get(key, default_val))
             if isinstance(default_val, bool):
                 clean_data[key] = bool(val)
             else:
@@ -136,36 +136,42 @@ class ConfigManager:
     # Journal d'état anti-coupure de courant (state_journal.json)
     # =========================================================================
     def load_state_journal(self) -> Dict[str, Any]:
-        """
-        Charge le journal d'état permettant de reprendre exactement au fichier près
-        après une coupure brusque d'électricité.
-        """
         default_state: Dict[str, Any] = {
             "active_session": False,
             "current_folder": "",
+            "last_completed_row_in_run": 0,
             "uploaded_files": {},  # b2_key -> {"size": int, "url": str}
         }
         loaded = safe_read_json(self.local_state_path) or safe_read_json(self.appdata_state_path)
         if loaded:
             default_state["active_session"] = bool(loaded.get("active_session", False))
             default_state["current_folder"] = str(loaded.get("current_folder", ""))
+            default_state["last_completed_row_in_run"] = int(loaded.get("last_completed_row_in_run", 0))
             if isinstance(loaded.get("uploaded_files"), dict):
                 default_state["uploaded_files"] = loaded["uploaded_files"]
         return default_state
 
     def save_state_journal(self, state: Dict[str, Any]) -> None:
-        """Enregistre atomiquement le journal d'état sur le disque."""
         for target in (self.local_state_path, self.appdata_state_path):
             try:
                 atomic_write_json(target, state)
             except Exception:
                 pass
 
-    def mark_session_active(self, active: bool, current_folder: str = "") -> None:
+    def mark_session_active(
+        self,
+        active: bool,
+        current_folder: str = "",
+        last_completed_row: Optional[int] = None,
+    ) -> None:
         state = self.load_state_journal()
         state["active_session"] = active
         if current_folder or not active:
             state["current_folder"] = current_folder
+        if last_completed_row is not None:
+            state["last_completed_row_in_run"] = int(last_completed_row)
+        elif not active:
+            state["last_completed_row_in_run"] = 0
         self.save_state_journal(state)
 
     def record_uploaded_file(self, b2_key: str, file_size: int, url: str) -> None:

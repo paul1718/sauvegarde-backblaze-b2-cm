@@ -1,7 +1,7 @@
 {
-    "version": "1.5.2",
+    "version": "1.5.3",
     "published_at": "2026-10-22",
-    "description": "Lancement automatique de l'application dès le rallumage du PC après une coupure de courant et reprise exacte au point d'arrêt.",
+    "description": "Correction de la résolution des dossiers par préfixe : espace obligatoire après chaque préfixe pour éviter toute confusion entre préfixes numériques (ex: TV326 vs TV3260).",
     "files": [
         "version.json",
         "app.py",

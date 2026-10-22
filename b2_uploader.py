@@ -60,20 +60,23 @@ def is_tav_folder(excel_dossier_name: str, folder_path: Optional[Path] = None) -
 def resolve_matching_folder(parent_dir: Path, excel_dossier_name: str) -> Optional[Path]:
     """
     Recherche dans `parent_dir` le dossier correspondant à `excel_dossier_name` :
-    1. Correspondance exacte (`parent_dir / excel_dossier_name`)
-    2. Sinon, tout dossier dont le nom COMMENCE par `excel_dossier_name` (insensible à la casse)
-       et se termine par autre chose.
+    1. Correspondance exacte directe (`parent_dir / excel_dossier_name`)
+    2. Correspondance exacte insensible à la casse (ex: 'tv326' == 'TV326')
+    3. Correspondance par préfixe : le nom du dossier sur le disque commence par le nom
+       du dossier Excel suivi OBLIGATOIREMENT d'un espace (ex: 'TV326 - ...' ou 'TV326 ...').
+       Il y a toujours un espace après le préfixe, ce qui évite formellement d'associer
+       'TV326' avec 'TV3260' ou 'TV3261'.
     """
     clean_name = excel_dossier_name.strip()
     if not clean_name or not parent_dir.exists() or not parent_dir.is_dir():
         return None
 
-    # 1. Correspondance exacte directe
+    # 1. Correspondance directe exacte
     exact_path = parent_dir / clean_name
     if exact_path.exists() and exact_path.is_dir():
         return exact_path
 
-    # 2. Recherche insensible à la casse (exacte d'abord, puis par préfixe)
+    # 2. Liste triée des sous-dossiers
     prefix_lower = clean_name.lower()
     try:
         subdirs = [d for d in parent_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
@@ -82,12 +85,16 @@ def resolve_matching_folder(parent_dir: Path, excel_dossier_name: str) -> Option
 
     subdirs.sort(key=natural_sort_key)
 
+    # 3. Recherche de correspondance exacte insensible à la casse
     for d in subdirs:
         if d.name.strip().lower() == prefix_lower:
             return d
 
+    # 4. Recherche par préfixe : il y a TOUJOURS un espace après le préfixe
+    # (ex: 'tv326 ' permet d'associer 'TV326 - ...', mais JAMAIS 'TV3260')
+    prefix_with_space = prefix_lower + " "
     for d in subdirs:
-        if d.name.strip().lower().startswith(prefix_lower):
+        if d.name.strip().lower().startswith(prefix_with_space):
             return d
 
     return None

@@ -57,7 +57,7 @@ def run_tests() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         parent = Path(tmpdir)
         folder_prefix = parent / "TAV_204 - Terrain Bastos (Lot 3)"
-        folder_empty_tav = parent / "TAV_999_Parcelle_Vide"
+        folder_empty_tav = parent / "TAV_999 Parcelle_Vide"
         folder_empty_other = parent / "Anniversaire_Vide_2026"
 
         folder_prefix.mkdir()
@@ -219,6 +219,37 @@ def run_tests() -> None:
         if vbs_startup is not None:
             assert not vbs_startup.exists(), "Le lanceur de secours doit être nettoyé une fois la sauvegarde terminée !"
         print("   -> OK : Lancement automatique au rallumage du PC et reprise exacte au point d'arrêt validés !")
+
+        print("6. Test de la résolution par préfixe avec espace obligatoire (ex: 'TV326' ne doit JAMAIS correspondre à 'TV3260')...")
+        test_dir = parent / "test_prefixes"
+        test_dir.mkdir()
+        dir_tv3260 = test_dir / "TV3260"
+        dir_tv3260_desc = test_dir / "TV3260 - Terrain B"
+        dir_tv326_desc = test_dir / "TV326 - Terrain A"
+        dir_tv326_exact = test_dir / "TV326"
+
+        dir_tv3260.mkdir()
+        dir_tv3260_desc.mkdir()
+
+        # Si TV3260 et TV3260 - Terrain B sont seuls, TV326 ne doit RIEN matcher (pas de fausse association)
+        assert resolve_matching_folder(test_dir, "TV326") is None, (
+            "TV326 ne doit JAMAIS correspondre à TV3260 car il manque l'espace après le préfixe !"
+        )
+
+        # Dès qu'un dossier avec espace existe ('TV326 - Terrain A'), TV326 doit l'associer
+        dir_tv326_desc.mkdir()
+        res_prefix = resolve_matching_folder(test_dir, "TV326")
+        assert res_prefix is not None and res_prefix.name == "TV326 - Terrain A"
+
+        # Si le dossier exact 'TV326' existe aussi, il doit être prioritaire
+        dir_tv326_exact.mkdir()
+        res_exact = resolve_matching_folder(test_dir, "TV326")
+        assert res_exact is not None and res_exact.name == "TV326"
+
+        # Et TV3260 doit bien correspondre à TV3260
+        res_tv3260 = resolve_matching_folder(test_dir, "TV3260")
+        assert res_tv3260 is not None and res_tv3260.name == "TV3260"
+        print("   -> OK : Règle de l'espace obligatoire après chaque préfixe validée à 100% !")
 
     # Mise à jour du modèle dossiers.xlsx du projet avec les colonnes complètes s'il est vide
     proj_excel = Path(__file__).resolve().parent / "dossiers.xlsx"

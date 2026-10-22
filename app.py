@@ -1413,7 +1413,12 @@ class BackblazeUploaderApp(ctk.CTk):
                     )
                     continue
 
-                if matched_folder.name != excel_name:
+                if matched_folder.name.strip().lower() == excel_name.strip().lower():
+                    self._queue_log(
+                        f"🔎 Dossier Excel '{excel_name}' associé au dossier : '{matched_folder.name}'",
+                        "INFO",
+                    )
+                else:
                     self._queue_log(
                         f"🔎 Dossier Excel '{excel_name}' associé par préfixe au dossier : '{matched_folder.name}'",
                         "INFO",
@@ -1916,6 +1921,8 @@ if __name__ == "__main__":
         _ext_app = get_app_dir() / "app.py"
         if _ext_app.exists():
             os.environ["_B2_EXTERNAL_LOADED"] = "1"
+            for _mod in ("b2_uploader", "excel_manager", "config_manager", "auto_updater"):
+                sys.modules.pop(_mod, None)
             import runpy
             runpy.run_path(str(_ext_app), run_name="__main__")
             sys.exit(0)

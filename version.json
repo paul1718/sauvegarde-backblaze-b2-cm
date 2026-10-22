@@ -1,7 +1,7 @@
 {
-    "version": "1.5.3",
+    "version": "1.5.4",
     "published_at": "2026-10-22",
-    "description": "Correction de la résolution des dossiers par préfixe : espace obligatoire après chaque préfixe pour éviter toute confusion entre préfixes numériques (ex: TV326 vs TV3260).",
+    "description": "Validation stricte des dossiers : priorité au nom exact complet, ou sinon au préfixe avec espace obligatoire ('nom' + ' ' + 'reste') pour éliminer définitivement les faux positifs (ex: TV42 vs TV420, TV155 vs TV1550).",
     "files": [
         "version.json",
         "app.py",

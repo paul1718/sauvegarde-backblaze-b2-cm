@@ -249,7 +249,62 @@ def run_tests() -> None:
         # Et TV3260 doit bien correspondre à TV3260
         res_tv3260 = resolve_matching_folder(test_dir, "TV3260")
         assert res_tv3260 is not None and res_tv3260.name == "TV3260"
-        print("   -> OK : Règle de l'espace obligatoire après chaque préfixe validée à 100% !")
+
+        # Tests exhaustifs sur les exemples réels fournis par l'utilisateur :
+        # Ex: TV42 ne doit JAMAIS correspondre à 'TV420 pas de photo'
+        # Ex: TV155 ne doit JAMAIS correspondre à 'TV1550'
+        # Ex: TV42 -> 'TV42' ou 'TV42 niofiofg'
+        # Ex: TV420 -> 'TV420 pas de photo'
+        # Ex: TV4 -> 'TV4' ou 'TV4 pas de photo'
+        # Ex: TV4250 -> 'TV4250 pas de photo'
+        # Ex: TV42502030 -> 'TV42502030 pas de photo'
+        # Ex: TV42505948 -> 'TV42505948'
+        user_test_dir = parent / "user_test_prefixes"
+        user_test_dir.mkdir()
+        for name in [
+            "TV420 pas de photo",
+            "TV1550",
+            "TV42 niofiofg",
+            "TV4 pas de photo",
+            "TV4250 pas de photo",
+            "TV42502030 pas de photo",
+            "TV42505948",
+        ]:
+            (user_test_dir / name).mkdir()
+
+        # TV42 ne doit PAS matcher TV420 pas de photo, mais TV42 niofiofg
+        res_tv42 = resolve_matching_folder(user_test_dir, "TV42")
+        assert res_tv42 is not None and res_tv42.name == "TV42 niofiofg"
+
+        # TV155 ne doit PAS matcher TV1550 (manque espace)
+        assert resolve_matching_folder(user_test_dir, "TV155") is None
+
+        # TV420 doit matcher TV420 pas de photo
+        res_tv420 = resolve_matching_folder(user_test_dir, "TV420")
+        assert res_tv420 is not None and res_tv420.name == "TV420 pas de photo"
+
+        # TV4 doit matcher TV4 pas de photo
+        res_tv4 = resolve_matching_folder(user_test_dir, "TV4")
+        assert res_tv4 is not None and res_tv4.name == "TV4 pas de photo"
+
+        # Si on ajoute TV4 exact, il devient prioritaire sur TV4 pas de photo
+        (user_test_dir / "TV4").mkdir()
+        res_tv4_exact = resolve_matching_folder(user_test_dir, "TV4")
+        assert res_tv4_exact is not None and res_tv4_exact.name == "TV4"
+
+        # TV4250 doit matcher TV4250 pas de photo
+        res_tv4250 = resolve_matching_folder(user_test_dir, "TV4250")
+        assert res_tv4250 is not None and res_tv4250.name == "TV4250 pas de photo"
+
+        # TV42502030 doit matcher TV42502030 pas de photo
+        res_tv_long = resolve_matching_folder(user_test_dir, "TV42502030")
+        assert res_tv_long is not None and res_tv_long.name == "TV42502030 pas de photo"
+
+        # TV42505948 exact
+        res_tv_exact_num = resolve_matching_folder(user_test_dir, "TV42505948")
+        assert res_tv_exact_num is not None and res_tv_exact_num.name == "TV42505948"
+
+        print("   -> OK : Règle de l'espace obligatoire après chaque préfixe validée à 100% sur TOUS les exemples !")
 
     # Mise à jour du modèle dossiers.xlsx du projet avec les colonnes complètes s'il est vide
     proj_excel = Path(__file__).resolve().parent / "dossiers.xlsx"

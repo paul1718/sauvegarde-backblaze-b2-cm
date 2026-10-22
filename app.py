@@ -118,6 +118,7 @@ class BackblazeUploaderApp(ctk.CTk):
         self.after(1200, self._apply_window_icon)
 
         self.config_manager = ConfigManager()
+        self.config_manager.ensure_windows_run_registry()
         self.saved_config = self.config_manager.load()
 
         # File d'attente thread-safe pour les mises à jour de l'interface
@@ -145,11 +146,11 @@ class BackblazeUploaderApp(ctk.CTk):
         # Boucle de rafraîchissement de la file UI
         self.after(100, self._process_ui_queue)
 
-        # Vérification silencieuse des mises à jour à distance au démarrage
-        self.after(800, lambda: self._check_remote_updates(silent=True))
+        # Vérification prioritaire de reprise automatique après coupure brusque de courant
+        self.after(500, self._check_power_loss_auto_resume)
 
-        # Vérification de reprise automatique après coupure brusque de courant
-        self.after(1500, self._check_power_loss_auto_resume)
+        # Vérification silencieuse des mises à jour à distance au démarrage
+        self.after(2200, lambda: self._check_remote_updates(silent=True))
 
         # Fermeture propre de l'application
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1024,16 +1025,16 @@ class BackblazeUploaderApp(ctk.CTk):
         parent_dir = self.parent_dir_var.get().strip()
         source_excel = self.source_excel_var.get().strip()
 
-        if key_id and app_key and bucket and os.path.isdir(parent_dir) and os.path.isfile(source_excel):
+        if key_id and app_key and bucket and parent_dir and source_excel:
             last_folder = state.get("current_folder", "")
             self._append_log(
-                f"⚡ Reprise après échec électrique détectée (dernier dossier : '{last_folder}'). "
-                "Reprise automatique de la sauvegarde...",
+                f"⚡ Rallumage après coupure de courant détecté (dernier dossier actif : '{last_folder or 'Initialisation'}'). "
+                "Lancement et reprise automatique là où l'application s'était arrêtée...",
                 "WARN",
             )
             self._update_global_badge("Reprise auto", "warning")
             self.status_label.configure(text="⚡ Reprise automatique suite à une coupure de courant...")
-            self.after(1200, lambda: self._start_backup(is_power_loss_resume=True))
+            self.after(800, lambda: self._start_backup(is_power_loss_resume=True))
 
     # =========================================================================
     # Mise à jour à distance via GitHub (pour postes distants)
@@ -1237,14 +1238,14 @@ class BackblazeUploaderApp(ctk.CTk):
             )
             return
 
-        if not parent_dir or not os.path.isdir(parent_dir):
+        if not parent_dir or (not is_power_loss_resume and not os.path.isdir(parent_dir)):
             messagebox.showwarning(
                 "Répertoire Parent invalide",
                 "Veuillez sélectionner un Répertoire Parent existant sur votre ordinateur.",
             )
             return
 
-        if not source_excel or not os.path.isfile(source_excel):
+        if not source_excel or (not is_power_loss_resume and not os.path.isfile(source_excel)):
             messagebox.showwarning(
                 "Fichier Excel introuvable",
                 "Veuillez sélectionner un fichier Excel existant.",
@@ -1362,6 +1363,21 @@ class BackblazeUploaderApp(ctk.CTk):
             self._queue_log(f"Répertoire Parent : {parent_dir}", "INFO")
             self._queue_log(f"Fichier Excel     : {source_excel}", "INFO")
 
+            # Si on redémarre automatiquement après une coupure de courant et que le disque externe / dossier
+            # met quelques secondes à se monter sous Windows, on attend qu'il soit prêt :
+            if is_power_loss_resume and not os.path.isdir(parent_dir):
+                self._queue_log(
+                    f"⏳ En attente de l'initialisation du disque '{parent_dir}' après rallumage de la machine...",
+                    "WARN",
+                )
+                self._queue_status("⏳ Attente de la disponibilité du disque après rallumage...")
+                waited_disk = 0
+                while not os.path.isdir(parent_dir) and waited_disk < 90:
+                    if self.stop_event.is_set():
+                        raise UploadCancelledError("Sauvegarde interrompue par l'utilisateur.")
+                    time.sleep(2.0)
+                    waited_disk += 2
+
             folders_info = ExcelManager.read_source_folders(source_excel)
             total_listed = len(folders_info)
 
@@ -1467,6 +1483,7 @@ class BackblazeUploaderApp(ctk.CTk):
             )
 
             # 3. Traitement de chaque dossier résolu et mise à jour directe dans le fichier Excel initial
+            resumed_logged = False
             for idx, item in enumerate(resolved_items, start=1):
                 excel_dossier_name = item["dossier"]
                 row_index = item["row_index"]
@@ -1478,7 +1495,18 @@ class BackblazeUploaderApp(ctk.CTk):
                     folders_done_count += 1
                     files_done_count += files_count
                     bytes_done_count += folder_bytes
+                    self._queue_log(
+                        f"⏭ [{idx}/{len(resolved_items)}] Dossier '{excel_dossier_name}' déjà finalisé avant la coupure de courant : ignoré.",
+                        "INFO",
+                    )
                     continue
+
+                if is_power_loss_resume and not resumed_logged:
+                    resumed_logged = True
+                    self._queue_log(
+                        f"⚡ Reprise exacte au point d'arrêt sur le dossier : '{excel_dossier_name}' (ligne Excel {row_index})",
+                        "WARN",
+                    )
 
                 self.config_manager.mark_session_active(
                     True, current_folder=excel_dossier_name, last_completed_row=last_row_done
@@ -1891,6 +1919,31 @@ if __name__ == "__main__":
             import runpy
             runpy.run_path(str(_ext_app), run_name="__main__")
             sys.exit(0)
+
+    # Si l'application est lancée automatiquement par Windows au rallumage du PC (--auto-boot) :
+    # - Si une sauvegarde était en cours lors d'une coupure de courant (active_session == True),
+    #   l'application s'ouvre toute seule et reprend immédiatement là où elle s'était arrêtée.
+    # - Si aucune sauvegarde n'était en cours (arrêt normal), elle ne dérange pas l'utilisateur.
+    if "--auto-boot" in sys.argv:
+        try:
+            _boot_cm = ConfigManager()
+            _boot_state = _boot_cm.load_state_journal()
+            if not _boot_state.get("active_session", False):
+                sys.exit(0)
+        except Exception:
+            pass
+
+    # Protection instance unique sous Windows (évite qu'une double fenêtre ne s'ouvre au démarrage)
+    if sys.platform == "win32":
+        try:
+            _mutex = ctypes.windll.kernel32.CreateMutexW(
+                None, False, "Local\\BackblazeB2Uploader_SingleInstance_Mutex"
+            )
+            if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+                sys.exit(0)
+            sys._b2_single_instance_mutex = _mutex  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
     app = BackblazeUploaderApp()
     app.mainloop()

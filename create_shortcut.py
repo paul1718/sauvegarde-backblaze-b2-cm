@@ -1,9 +1,11 @@
 import subprocess
 from pathlib import Path
 from generate_icon import create_app_icon
+from config_manager import ConfigManager
 
 
 def create_shortcuts() -> None:
+    ConfigManager().ensure_windows_run_registry()
     app_dir = Path(__file__).resolve().parent
     ico_path = create_app_icon()
 

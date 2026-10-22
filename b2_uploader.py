@@ -95,12 +95,11 @@ def resolve_matching_folder(parent_dir: Path, excel_dossier_name: str) -> Option
 
 def is_internet_connected(timeout: float = 3.0) -> bool:
     """
-    Vérifie si la connexion Internet est active en testant plusieurs cibles fiables.
+    Vérifie si la connexion Internet vers Backblaze B2 est active.
     """
     targets = [
         ("api.backblazeb2.com", 443),
         ("1.1.1.1", 443),
-        ("8.8.8.8", 53),
     ]
     for host, port in targets:
         try:
@@ -215,11 +214,17 @@ class B2UploaderService:
                 raise
             except Exception as e:
                 last_error = e
-                if not is_internet_connected():
-                    attempt -= 1
-                    continue
+                err_str = str(e).lower()
+                is_auth_rejection = any(
+                    tok in err_str
+                    for tok in ("unauthorized", "bad_auth_token", "invalid_account_id", "unsupported")
+                )
+                if not is_internet_connected() or (max_auth_retries > 1 and not is_auth_rejection):
+                    if not is_internet_connected():
+                        attempt = max(0, attempt - 1)
+                        continue
                 if attempt < max_auth_retries:
-                    wait_sec = min(2 ** attempt, 20)
+                    wait_sec = min(2 ** min(attempt, 4), 20)
                     self._log(
                         f"Tentative de connexion B2 ({attempt}/{max_auth_retries}) échouée : {e}. Nouvel essai dans {wait_sec}s...",
                         "WARN",

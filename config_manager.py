@@ -167,6 +167,81 @@ class ConfigManager:
         elif not active:
             state["last_completed_row_in_run"] = 0
         self.save_state_journal(state)
+        self.sync_windows_boot_resume(active)
+
+    def get_launch_command(self, with_auto_boot_flag: bool = True) -> str:
+        """Construit la commande de lancement automatique au démarrage de Windows."""
+        exe_path = self.app_dir / "dist" / "BackblazeB2Uploader" / "BackblazeB2Uploader.exe"
+        flag = " --auto-boot" if with_auto_boot_flag else ""
+        if exe_path.exists():
+            return f'"{exe_path}"{flag}'
+        app_py = self.app_dir / "app.py"
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        runner = pythonw if pythonw.exists() else Path(sys.executable)
+        return f'"{runner}" "{app_py}"{flag}'
+
+    def ensure_windows_run_registry(self) -> bool:
+        """
+        Enregistre l'application dans le démarrage automatique Windows (HKCU\\...\\Run)
+        avec l'option --auto-boot :
+        - Si le PC redémarre après une coupure de courant (active_session=True), l'application
+          s'ouvre toute seule et reprend immédiatement là où elle s'était arrêtée.
+        - Si aucune sauvegarde n'était en cours (active_session=False), --auto-boot se referme
+          silencieusement sans ouvrir de fenêtre.
+        """
+        if os.name != "nt":
+            return False
+        try:
+            import winreg
+            cmd = self.get_launch_command(with_auto_boot_flag=True)
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as reg_key:
+                winreg.SetValueEx(reg_key, "BackblazeB2Uploader", 0, winreg.REG_SZ, cmd)
+            return True
+        except Exception:
+            return False
+
+    def _get_startup_vbs_path(self) -> Optional[Path]:
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return None
+        startup_dir = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+        if startup_dir.exists():
+            return startup_dir / "BackblazeB2_AutoResume.vbs"
+        return None
+
+    def sync_windows_boot_resume(self, active: bool) -> None:
+        """
+        Active ou désactive le lanceur de secours dans le dossier Démarrage de Windows
+        et garantit que la clé de registre Run est présente.
+        Ainsi, dès qu'on rallume la machine après une coupure de courant, Windows lance
+        automatiquement l'application qui reprend là où elle s'était arrêtée.
+        """
+        self.ensure_windows_run_registry()
+        vbs_path = self._get_startup_vbs_path()
+        if vbs_path is None:
+            return
+
+        if active:
+            cmd = self.get_launch_command(with_auto_boot_flag=True).replace('"', '""')
+            vbs_content = (
+                'Set WshShell = CreateObject("WScript.Shell")\r\n'
+                f'WshShell.CurrentDirectory = "{self.app_dir}"\r\n'
+                f'WshShell.Run "{cmd}", 1, False\r\n'
+            )
+            try:
+                with open(vbs_path, "w", encoding="utf-8") as f:
+                    f.write(vbs_content)
+                    f.flush()
+                    os.fsync(f.fileno())
+            except Exception:
+                pass
+        else:
+            if vbs_path.exists():
+                try:
+                    vbs_path.unlink()
+                except Exception:
+                    pass
 
     def record_uploaded_file(self, b2_key: str, file_size: int, url: str) -> None:
         state = self.load_state_journal()

@@ -204,6 +204,22 @@ def run_tests() -> None:
         wb_rec.close()
         print("   -> OK : Auto-réparation après coupure de courant + rejeu automatique du journal WAL validés à 100% !")
 
+        print("5. Test de l'enregistrement du lancement automatique Windows au rallumage du PC après coupure de courant...")
+        cm = ConfigManager()
+        assert cm.ensure_windows_run_registry(), "L'enregistrement dans le Registre Windows (HKCU Run) doit réussir !"
+        cm.mark_session_active(True, current_folder="TAV_204", last_completed_row=3)
+        state_active = cm.load_state_journal()
+        assert state_active["active_session"] is True
+        assert state_active["current_folder"] == "TAV_204"
+        assert state_active["last_completed_row_in_run"] == 3
+        vbs_startup = cm._get_startup_vbs_path()
+        if vbs_startup is not None:
+            assert vbs_startup.exists(), "Le lanceur de secours dans le dossier Démarrage Windows doit être présent pendant une session active !"
+        cm.mark_session_active(False)
+        if vbs_startup is not None:
+            assert not vbs_startup.exists(), "Le lanceur de secours doit être nettoyé une fois la sauvegarde terminée !"
+        print("   -> OK : Lancement automatique au rallumage du PC et reprise exacte au point d'arrêt validés !")
+
     # Mise à jour du modèle dossiers.xlsx du projet avec les colonnes complètes s'il est vide
     proj_excel = Path(__file__).resolve().parent / "dossiers.xlsx"
     if proj_excel.exists():

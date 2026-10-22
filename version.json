@@ -1,7 +1,7 @@
 {
-    "version": "1.5.1",
-    "published_at": "2026-10-21",
-    "description": "Protection matérielle anti-coupure de courant (fsync disque, sérialisation RAM validée, double sauvegarde miroir et journal de transaction WAL auto-réparateur).",
+    "version": "1.5.2",
+    "published_at": "2026-10-22",
+    "description": "Lancement automatique de l'application dès le rallumage du PC après une coupure de courant et reprise exacte au point d'arrêt.",
     "files": [
         "version.json",
         "app.py",
